@@ -35,7 +35,7 @@ function readPackageVersion(): string {
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: { level: process.env.LOG_LEVEL ?? 'info' },
+    logger: { level: config.http.logLevel },
     trustProxy: config.http.trustProxy === 'true',
   })
 
