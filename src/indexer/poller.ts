@@ -139,10 +139,10 @@ async function resolveStartLedger(): Promise<number> {
  *  quarantine path (issue #43) so both write the same row the same way. */
 async function insertRawEvent(client: PoolClient, ev: DecodedEvent): Promise<boolean> {
   const ins = await client.query(
-    `INSERT INTO events (id, ledger, closed_at, contract_id, symbol, topics, data, tx_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO events (id, ledger, closed_at, contract_id, symbol, topics, data, tx_hash, decode_error)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (id) DO NOTHING`,
-    [ev.id, ev.ledger, ev.closedAt, ev.contractId, ev.symbol, JSON.stringify(ev.topics), JSON.stringify(ev.data), ev.txHash]
+    [ev.id, ev.ledger, ev.closedAt, ev.contractId, ev.symbol, JSON.stringify(ev.topics), JSON.stringify(ev.data), ev.txHash, ev.decodeError ?? null]
   )
   return ins.rowCount === 1
 }

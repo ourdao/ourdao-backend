@@ -132,6 +132,7 @@ export interface DecodedEvent {
   data: unknown[]
   /** Named view of `data` when the symbol is in the catalog. */
   fields: Record<string, unknown>
+  decodeError?: string | null
 }
 
 /** Recursively convert bigints to strings so values survive JSON/JSONB. */
@@ -146,11 +147,13 @@ export function toJsonSafe(v: unknown): unknown {
   return v
 }
 
-function safeNative(scv: xdr.ScVal): unknown {
+function safeNative(scv: xdr.ScVal, evInfo: { id: string, ledger: number }, pos: string): { val: unknown; err?: string } {
   try {
-    return toJsonSafe(scValToNative(scv))
-  } catch {
-    return null
+    return { val: toJsonSafe(scValToNative(scv)) }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    console.error(`[events] decode error at ledger ${evInfo.ledger}, event ${evInfo.id}, ${pos}: ${msg}`)
+    return { val: null, err: msg }
   }
 }
 
@@ -203,10 +206,21 @@ export function isKnownSymbol(symbol: string): symbol is EventSymbol {
 
 /** Decode one getEvents response entry into a JSON-safe DecodedEvent. */
 export function decodeEvent(ev: rpc.Api.EventResponse): DecodedEvent {
-  const topics = (ev.topic ?? []).map(safeNative)
-  const symbol = typeof topics[0] === 'string' ? topics[0] : String(topics[0] ?? '')
+  const evInfo = { id: ev.id, ledger: ev.ledger }
+  let decodeError: string | null = null
+  const topics: unknown[] = []
+  
+  ;(ev.topic ?? []).forEach((t, i) => {
+    const res = safeNative(t, evInfo, `topic ${i}`)
+    if (res.err && !decodeError) decodeError = res.err
+    topics.push(res.val)
+  })
 
-  const nativeValue = safeNative(ev.value)
+  const symbol = typeof topics[0] === 'string' && topics[0] !== '' ? topics[0] : String(topics[0] ?? '')
+
+  const dataRes = safeNative(ev.value, evInfo, 'data')
+  if (dataRes.err && !decodeError) decodeError = dataRes.err
+  const nativeValue = dataRes.val
   const data = Array.isArray(nativeValue) ? nativeValue : [nativeValue]
 
   const fields = namedFields(symbol, data)
@@ -221,5 +235,6 @@ export function decodeEvent(ev: rpc.Api.EventResponse): DecodedEvent {
     topics,
     data,
     fields,
+    decodeError,
   }
 }

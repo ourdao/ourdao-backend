@@ -95,15 +95,15 @@ async function seed(target: number, batch = 2000): Promise<void> {
     const params: unknown[] = []
     for (let i = 0; i < n; i++) {
       const ev = sampleEvent(done + i)
-      const b = i * 8
-      values.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`)
+      const b = i * 9
+      values.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9})`)
       params.push(
         ev.id, ev.ledger, ev.closedAt, ev.contractId, ev.symbol,
-        JSON.stringify(ev.topics), JSON.stringify(ev.data), null
+        JSON.stringify(ev.topics), JSON.stringify(ev.data), ev.txHash, ev.decodeError
       )
     }
     await pool.query(
-      `INSERT INTO events (id, ledger, closed_at, contract_id, symbol, topics, data, tx_hash)
+      `INSERT INTO events (id, ledger, closed_at, contract_id, symbol, topics, data, tx_hash, decode_error)
        VALUES ${values.join(',')} ON CONFLICT (id) DO NOTHING`,
       params
     )
