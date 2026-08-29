@@ -27,10 +27,21 @@ async function ingest(client: PoolClient, ev: DecodedEvent): Promise<void> {
 
 async function derivedSnapshot(): Promise<Record<string, unknown[]>> {
   const snap: Record<string, unknown[]> = {}
-  for (const table of DERIVED_TABLES) {
-    snap[table] = await query(`SELECT * FROM ${table} ORDER BY 1`)
+  
+  const stripTimestamps = (rows: any[]) => {
+    return rows.map((r) => {
+      const { created_at, updated_at, ...rest } = r
+      return rest
+    })
   }
-  snap.dao_totals = await query('SELECT * FROM dao_totals ORDER BY id')
+
+  for (const table of DERIVED_TABLES) {
+    const rows = await query(`SELECT * FROM ${table} ORDER BY 1`)
+    snap[table] = stripTimestamps(rows)
+  }
+  
+  const totalRows = await query('SELECT * FROM dao_totals ORDER BY id')
+  snap.dao_totals = stripTimestamps(totalRows)
   return snap
 }
 
