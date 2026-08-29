@@ -52,16 +52,19 @@ describe('events log — storage shape is pinned (issue #75)', () => {
       { column_name: 'topics', data_type: 'jsonb' },
       { column_name: 'data', data_type: 'jsonb' },
       { column_name: 'tx_hash', data_type: 'text' },
+      { column_name: 'decode_error', data_type: 'text' },
       { column_name: 'created_at', data_type: 'timestamp with time zone' },
     ])
   })
 
-  it('has exactly the three secondary indexes evaluated in docs/events-storage.md', async () => {
+  it('has exactly the secondary indexes evaluated in docs/events-storage.md', async () => {
     const idx = await query<{ indexname: string }>(
       `SELECT indexname FROM pg_indexes WHERE tablename = 'events' ORDER BY indexname`
     )
     expect(idx.map((r) => r.indexname).sort()).toEqual([
       'events_contract_id_idx',
+      'events_data_gin_idx',
+      'events_entity_id_idx',
       'events_ledger_idx',
       'events_pkey',
       'events_symbol_idx',

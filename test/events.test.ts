@@ -85,18 +85,16 @@ describe('decodeEvent', () => {
   })
 
   it('captures topic decode error and flags the event', () => {
-    // Malformed topic that scValToNative will fail on
-    // Passing null casted as ScVal forces a throw in scValToNative
     const data = tuple(nativeToScVal(1, { type: 'u32' }))
     const evRaw = makeEvent('some_symbol', data)
-    evRaw.topic = [null as unknown as xdr.ScVal]
+    evRaw.topic = [{} as xdr.ScVal]
     const ev = decodeEvent(evRaw)
     expect(ev.decodeError).toBeTruthy()
     expect(ev.symbol).toBe('')
   })
 
   it('captures data decode error and flags the event', () => {
-    const evRaw = makeEvent('some_symbol', null as unknown as xdr.ScVal)
+    const evRaw = makeEvent('some_symbol', {} as xdr.ScVal)
     const ev = decodeEvent(evRaw)
     expect(ev.decodeError).toBeTruthy()
   })
