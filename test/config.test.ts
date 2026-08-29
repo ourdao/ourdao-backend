@@ -48,7 +48,7 @@ describe('resolveConfig', () => {
         trustProxy: 'false',
         statsCacheMs: 5000,
       },
-      db: { connectionString: undefined },
+      db: { connectionString: undefined, nonceStore: 'postgres' },
       stellar: {
         contractId: '',
         rpcUrl: 'https://soroban-testnet.stellar.org',

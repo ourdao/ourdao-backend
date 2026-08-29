@@ -22,7 +22,7 @@ describe('API: /members/:address/summary', () => {
   afterAll(closeDb)
 
   it('GET /api/members/:address/summary returns 404 for unknown address', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/members/GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7/summary' })
+    const res = await app.inject({ method: 'GET', url: '/api/members/GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI/summary' })
     expect(res.statusCode).toBe(404)
   })
 
@@ -30,29 +30,29 @@ describe('API: /members/:address/summary', () => {
     await query(`
       INSERT INTO members (address, joined_ledger, contribution, stake, exited)
       VALUES 
-      ('GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7', 100, '5000', '1000', false),
+      ('GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI', 100, '5000', '1000', false),
       ('GD2XX', 100, '5000', '1000', false)
     `)
 
     await query(`
       INSERT INTO loans (id, borrower, amount, outstanding, total_repayment, status)
       VALUES 
-      (1, 'GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7', '1000', '1000', '1100', 'active'),
-      (2, 'GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7', '500', '0', '550', 'repaid')
+      (1, 'GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI', '1000', '1000', '1100', 'active'),
+      (2, 'GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI', '500', '0', '550', 'repaid')
     `)
 
     await query(`
       INSERT INTO notifications (address, type, title, message, read)
       VALUES 
-      ('GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7', 'info', 'Test', 'Msg', false),
-      ('GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7', 'info', 'Test 2', 'Msg 2', true)
+      ('GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI', 'info', 'Test', 'Msg', false),
+      ('GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI', 'info', 'Test 2', 'Msg 2', true)
     `)
 
-    const res = await app.inject({ method: 'GET', url: '/api/members/GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7/summary' })
+    const res = await app.inject({ method: 'GET', url: '/api/members/GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI/summary' })
     expect(res.statusCode).toBe(200)
     
     const body = res.json()
-    expect(body.member.address).toBe('GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7')
+    expect(body.member.address).toBe('GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI')
     expect(body.loans).toHaveLength(2)
     expect(body.loans[0].interest_charge).toBe('100') // Derived via withLoanDerived
     expect(body.unread_notifications).toBe(1)
@@ -68,9 +68,9 @@ describe('API: /members/:address/summary', () => {
   it('GET /api/members/:address/summary handles exited member position correctly', async () => {
     await query(`
       INSERT INTO members (address, joined_ledger, contribution, stake, exited)
-      VALUES ('GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7', 100, '5000', '1000', true)
+      VALUES ('GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI', 100, '5000', '1000', true)
     `)
-    const res = await app.inject({ method: 'GET', url: '/api/members/GCXKG54ZMBK7T7BGB7PGEGB2Q54ZMBK7T7BGB7PGEGB2Q54ZMBK7/summary' })
+    const res = await app.inject({ method: 'GET', url: '/api/members/GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI/summary' })
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.position.stake_share_bps).toBe('0') // Exited member has 0% stake share
