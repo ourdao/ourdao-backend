@@ -25,6 +25,7 @@ This repository is one of three that make up OurDAO:
 
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
+- [Deployment](#deployment)
 - [Configuration](#configuration)
 - [Database schema](#database-schema)
 - [Event catalog](#event-catalog)
@@ -77,6 +78,16 @@ npm run build
 npm start              # API
 npm run start:worker   # indexer
 ```
+
+## Deployment
+
+The full deployment guide is in **[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)**. Key points that are easy to get wrong:
+
+- **The worker must run as a singleton.** Running two workers concurrently corrupts vote tallies through non-idempotent increments — the failure is silent. The API is stateless and can scale horizontally; the worker cannot.
+- **Set `START_LEDGER` before the first boot.** The public Soroban RPC retains roughly 24 hours of event history. If your contract was deployed before that window, set `START_LEDGER` to the contract's deploy ledger. Events older than the RPC window are permanently unavailable — you cannot fetch them later.
+- **Set `CORS_ORIGIN` to the real frontend origin.** It defaults to `http://localhost:3000`. Leaving it at the default silently blocks every browser request from the production frontend.
+- **`events` is the only table you must back up.** All other tables (`members`, `loan_proposals`, `loans`, etc.) are derived from it and can be rebuilt with `npm run reindex`.
+- **Repointing at a new `CONTRACT_ID` requires an explicit reset step.** The worker refuses to start if the configured contract id doesn't match the one stored in the cursor — see [Redeploying the contract](./docs/DEPLOYMENT.md#redeploying-the-contract) for options.
 
 ## Configuration
 
@@ -216,7 +227,13 @@ Stellar's consensus gives fast finality, so a deep reorg is genuinely unlikely �
 
 - The cursor stores `last_ledger` (and `last_ledger_hash`, the RPC tip hash at each advance — Soroban's `getEvents` exposes no per-event ledger hash, so deeper verification isn't possible).
 - Each poll checks continuity: if the RPC's reported latest ledger is **below** the last folded ledger, or a fetched page contains an event from a ledger already folded past, the indexer **halts** with a loud log line instead of retrying.
-- **Recovery:** confirm the true chain state, then run `npm run reindex` (`node dist/indexer/reindex.js` in the container). It truncates the derived tables and rebuilds them from the raw `events` log in one transaction — the log is authoritative and untouched. A rebuild produces state identical to the incremental fold (asserted by a test), so `reindex` is also the repair path for the historical-data bugs tracked in other issues.
+- **Recovery:** stop the indexer worker (`node dist/worker.js`) and run `npm run reindex` (`node dist/indexer/reindex.js` in the container). It truncates the derived tables and rebuilds them from the raw `events` log in one transaction — the log is authoritative and untouched. A rebuild produces state identical to the incremental fold (asserted by a test), so `reindex` is also the repair path for the historical-data bugs tracked in other issues.
+- **Worker serialization (Advisory Lock):** Both `reindex` and the worker's event fold loops acquire a dedicated session-level Postgres advisory lock (`0x0d400001`). If a reindex is attempted while a worker is running or folding, it fails immediately with an actionable error rather than racing to corrupt derived state.
+- **Streaming & Memory Bounds:** The rebuild streams the event log via keyset pagination over `(ledger, id)` in batches (default 1,000) inside a single transaction, keeping Node.js memory flat (~40–60 MB RSS) regardless of event log size (e.g., 100k+ events). Progress is logged periodically with event counts, percentage, throughput (events/s), and estimated ETA.
+- **Rebuild Performance Expectations:**
+  - **10k events:** ~1–2 seconds, ~45 MB peak RSS.
+  - **100k events:** ~10–20 seconds, ~55 MB peak RSS.
+  - **500k events:** ~50–90 seconds, ~60 MB peak RSS.
 - **Unrecoverable:** events that were orphaned *and* already pruned from the RPC's ~24h window can't be re-fetched; `reindex` rebuilds from whatever the raw log holds.
 - **`last_ledger` only ever advances to a ledger whose events were actually folded (issue #45).** An earlier version fell back to the RPC's reported chain tip on an empty `getEvents` page, which conflated "highest ledger folded" with "how current the RPC is" — during catch-up, one empty page could jump `last_ledger` to the tip, and the very next real (but still historically-earlier) page would then look like a rewind and trigger a false halt. The RPC-observed tip is tracked in its own column, `observed_tip_ledger` — freshness reporting only (`/ready`, `/api/stats.observedTipLedger`), never fed into the continuity check above.
 

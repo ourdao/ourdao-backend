@@ -234,7 +234,7 @@ export async function notifyStreamClients(
 ): Promise<void> {
   try {
     const payloadJson = payload ? JSON.stringify(payload) : ''
-    await client.query(`NOTIFY "${channel}", $1`, [payloadJson])
+    await client.query('SELECT pg_notify($1, $2)', [channel, payloadJson])
   } catch (err) {
     // Log but don't throw — notification failure shouldn't break the indexer
     console.error('[stream] NOTIFY error:', err)
