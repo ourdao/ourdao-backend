@@ -25,6 +25,7 @@ This repository is one of three that make up OurDAO:
 
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
+- [Deployment](#deployment)
 - [Configuration](#configuration)
 - [Database schema](#database-schema)
 - [Event catalog](#event-catalog)
@@ -77,6 +78,16 @@ npm run build
 npm start              # API
 npm run start:worker   # indexer
 ```
+
+## Deployment
+
+The full deployment guide is in **[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)**. Key points that are easy to get wrong:
+
+- **The worker must run as a singleton.** Running two workers concurrently corrupts vote tallies through non-idempotent increments — the failure is silent. The API is stateless and can scale horizontally; the worker cannot.
+- **Set `START_LEDGER` before the first boot.** The public Soroban RPC retains roughly 24 hours of event history. If your contract was deployed before that window, set `START_LEDGER` to the contract's deploy ledger. Events older than the RPC window are permanently unavailable — you cannot fetch them later.
+- **Set `CORS_ORIGIN` to the real frontend origin.** It defaults to `http://localhost:3000`. Leaving it at the default silently blocks every browser request from the production frontend.
+- **`events` is the only table you must back up.** All other tables (`members`, `loan_proposals`, `loans`, etc.) are derived from it and can be rebuilt with `npm run reindex`.
+- **Repointing at a new `CONTRACT_ID` requires an explicit reset step.** The worker refuses to start if the configured contract id doesn't match the one stored in the cursor — see [Redeploying the contract](./docs/DEPLOYMENT.md#redeploying-the-contract) for options.
 
 ## Configuration
 
