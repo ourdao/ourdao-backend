@@ -31,6 +31,16 @@ export const EVENT_FIELDS = {
   loan_appr: ['id', 'borrower', 'amount', 'due_time'],
   loan_rpy: ['loan_id', 'borrower', 'outstanding'],
   loan_dflt: ['loan_id', 'borrower', 'penalty'],
+  // Permissionless keeper call that transitions a loan proposal whose voting
+  // window closed without reaching quorum. Fields match the contract's
+  // publish order in loans.rs::expire_loan_proposal exactly:
+  // env.events().publish((symbol_short!("loan_exp"),), (proposal_id, proposal.borrower)).
+  // The contract doc says it "succeeds exactly once per proposal — subsequent
+  // calls are a no-op (no double event)", so re-delivery is safe to guard at
+  // the DB level (WHERE status = 'pending').
+  // Introduced in ourdao-contracts @ the commit that added expire_loan_proposal
+  // (loans.rs). Fixes issue #38.
+  loan_exp: ['proposal_id', 'borrower'],
   interest: ['interest', 'active'],
   tre_prop: ['id', 'amount', 'destination', 'private'],
   tre_vote: ['id', 'voter', 'support', 'weight'],
@@ -66,6 +76,7 @@ export const LOAN_TIMELINE_SYMBOLS = [
   'loan_appr',
   'loan_rpy',
   'loan_dflt',
+  'loan_exp',
 ] as const
 
 /** Treasury proposal lifecycle event symbols (issue #26). The proposal id is
@@ -100,6 +111,7 @@ export const MEMBER_ACTIVITY_SYMBOLS = [
   'loan_appr',
   'loan_rpy',
   'loan_dflt',
+  'loan_exp',
   'tre_vote',
   'committed',
   'revealed',

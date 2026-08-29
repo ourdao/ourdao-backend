@@ -25,11 +25,22 @@ import type {
 } from '../../types.js'
 import { authenticateRequest, isValidStellarAddress, type NonceStore } from '../../auth.js'
 
+function parseLimit(v: unknown, def = 50, max = 200): number | null {
+  if (v === undefined || v === null || v === '') return def
+  const raw = String(v).trim()
+  if (!/^[0-9]+$/.test(raw)) return null
+  const n = Number(raw)
+  if (!Number.isSafeInteger(n) || n <= 0 || n > max) return null
+  return n
+}
+
+function invalidLimit(v: unknown, def = 50, max = 200): boolean {
+  return parseLimit(v, def, max) === null
+}
+
 // Small helper: clamp a `limit` query param to a sane range.
 function limit(v: unknown, def = 50, max = 200): number {
-  const n = Number.parseInt(String(v ?? ''), 10)
-  if (!Number.isFinite(n) || n <= 0) return def
-  return Math.min(n, max)
+  return parseLimit(v, def, max) ?? def
 }
 
 // Parse an optional numeric pagination cursor (e.g. `?before=`). Returns null
@@ -171,7 +182,9 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // joined the DAO (issue #14). A real member always has a join ledger.
   app.get('/members', async (req, reply) => {
     reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
-    const l = limit((req.query as Record<string, unknown>).limit)
+    const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
+    const l = limit(q.limit)
     return query<MemberRow>(
       `SELECT * FROM members
         WHERE exited = false AND joined_ledger IS NOT NULL
@@ -265,6 +278,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
     const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
@@ -286,7 +300,9 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // --- Loan proposals ---
   app.get('/proposals/loan', async (req, reply) => {
     reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
-    const l = limit((req.query as Record<string, unknown>).limit)
+    const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
+    const l = limit(q.limit)
     return query<LoanProposalRow>('SELECT * FROM loan_proposals ORDER BY id DESC LIMIT $1', [l])
   })
 
@@ -294,9 +310,15 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get('/loans', async (req, reply) => {
     reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
     const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
+    if (q.borrower !== undefined && q.borrower !== null && q.borrower !== '') {
+      if (typeof q.borrower !== 'string' || !validAddress(q.borrower)) {
+        return reply.code(400).send({ error: 'invalid Stellar address' })
+      }
+    }
     const borrower = typeof q.borrower === 'string' && q.borrower ? q.borrower : null
 
     const conditions: string[] = []
@@ -346,7 +368,9 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // --- Treasury proposals ---
   app.get('/proposals/treasury', async (req, reply) => {
     reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
-    const l = limit((req.query as Record<string, unknown>).limit)
+    const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
+    const l = limit(q.limit)
     return query<TreasuryProposalRow>('SELECT * FROM treasury_proposals ORDER BY id DESC LIMIT $1', [l])
   })
 
@@ -367,9 +391,10 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get('/notifications', async (req, reply) => {
     reply.header('Cache-Control', 'private, no-cache')
     const q = req.query as Record<string, unknown>
-    if (typeof q.address !== 'string' || !q.address) {
-      return reply.code(400).send({ error: 'address query param is required' })
+    if (typeof q.address !== 'string' || !q.address || !validAddress(q.address)) {
+      return reply.code(400).send({ error: 'invalid Stellar address' })
     }
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     return query<NotificationRow>(
       'SELECT * FROM notifications WHERE address = $1 ORDER BY id DESC LIMIT $2',
@@ -388,6 +413,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     },
   }, async (req, reply) => {
     const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     const before = eventCursor(q.before)
     const after = eventCursor(q.after)
@@ -460,10 +486,11 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       return reply.code(auth.status).send({ error: auth.error || 'Authentication required' })
     }
 
-    const id = Number(req.params.id)
-    if (!Number.isFinite(id)) {
+    const rawId = req.params.id.trim()
+    if (!/^[0-9]+$/.test(rawId) || !Number.isSafeInteger(Number(rawId)) || Number(rawId) <= 0) {
       return reply.code(400).send({ error: 'invalid notification id' })
     }
+    const id = Number(rawId)
 
     // Get the notification to check ownership
     const notification = await queryOne<NotificationRow>(
@@ -489,8 +516,8 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // --- Mark all of an address's notifications as read ---
   app.patch('/notifications/read-all', async (req, reply) => {
     const q = req.query as Record<string, unknown>
-    if (typeof q.address !== 'string' || !q.address) {
-      return reply.code(400).send({ error: 'address query param is required' })
+    if (typeof q.address !== 'string' || !q.address || !validAddress(q.address)) {
+      return reply.code(400).send({ error: 'invalid Stellar address' })
     }
     
     // Authenticate the request and verify the address matches
@@ -510,6 +537,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // policy, pause/unpause) ---
   app.get('/admin/log', async (req, reply) => {
     const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     const before = cursor(q.before)
     
@@ -543,6 +571,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // sum credited to members (documented in the README).
   app.get('/interest', async (req, reply) => {
     const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
@@ -577,6 +606,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // one route keeps the pagination/validation logic in one place.
   app.get('/documents', async (req, reply) => {
     const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
@@ -619,6 +649,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get('/admin/failed-events', async (req, reply) => {
     reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
     const q = req.query as Record<string, unknown>
+    if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     return query<FailedEventRow>(
       'SELECT * FROM failed_events ORDER BY id DESC LIMIT $1',

@@ -156,9 +156,11 @@ CREATE TABLE IF NOT EXISTS notifications (
   ledger     BIGINT,
   tx_hash    TEXT,
   read       BOOLEAN NOT NULL DEFAULT false,
+  event_id   TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS notifications_address_idx ON notifications (address, read);
+CREATE INDEX IF NOT EXISTS notifications_event_id_address_idx ON notifications (event_id, address);
 
 -- Lifetime money aggregates folded from the raw event log (issue #24).
 -- Single row (id = 1). O(1) to read; kept in sync as events fold, and

@@ -54,11 +54,6 @@ export async function migrate(): Promise<void> {
   try {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY])
     try {
-      const preExisting = await client.query<{ to_regclass: string | null }>(
-        "SELECT to_regclass('public.events')"
-      )
-      const isFreshDatabase = preExisting.rows[0]?.to_regclass == null
-
       const schemaSql = await readFile(join(here, 'schema.sql'), 'utf8')
       await client.query(schemaSql)
 
@@ -67,6 +62,7 @@ export async function migrate(): Promise<void> {
 
       const applied = await client.query<{ version: number }>('SELECT version FROM schema_migrations')
       const appliedVersions = new Set(applied.rows.map((r) => r.version))
+      const isFreshDatabase = appliedVersions.size === 0
 
       for (const migration of migrations) {
         if (appliedVersions.has(migration.version)) continue
@@ -75,7 +71,7 @@ export async function migrate(): Promise<void> {
           // schema.sql just created this migration's end state directly;
           // record it as applied without re-running its SQL.
           await client.query(
-            'INSERT INTO schema_migrations (version, name) VALUES ($1, $2)',
+            'INSERT INTO schema_migrations (version, name) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING',
             [migration.version, migration.name]
           )
           continue
@@ -85,10 +81,10 @@ export async function migrate(): Promise<void> {
         await client.query('BEGIN')
         try {
           await client.query(sql)
-          await client.query('INSERT INTO schema_migrations (version, name) VALUES ($1, $2)', [
-            migration.version,
-            migration.name,
-          ])
+          await client.query(
+            'INSERT INTO schema_migrations (version, name) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING',
+            [migration.version, migration.name]
+          )
           await client.query('COMMIT')
           console.log(`[db] applied migration ${migration.name}`)
         } catch (err) {

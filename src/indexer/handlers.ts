@@ -103,9 +103,9 @@ async function notify(
 ): Promise<void> {
   if (!address) return
   await client.query(
-    `INSERT INTO notifications (address, type, title, message, ledger, tx_hash)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [address, type, title, message, ev.ledger, ev.txHash]
+    `INSERT INTO notifications (address, type, title, message, ledger, tx_hash, event_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [address, type, title, message, ev.ledger, ev.txHash, ev.id]
   )
 }
 
@@ -357,6 +357,26 @@ const handlers: Record<string, Handler> = {
     )
   },
 
+  async loan_exp(client, ev) {
+    const proposalId = requireId(ev, 'proposal_id')
+    const borrower = requireAddr(ev, 'borrower')
+    // Guard on `status = 'pending'` so a re-delivered `loan_exp` event is a clean no-op.
+    const updated = await client.query(
+      `UPDATE loan_proposals SET status = 'rejected', updated_at = now() WHERE id = $1 AND status = 'pending'`,
+      [proposalId]
+    )
+    if (updated.rowCount === 0) return
+
+    await notify(
+      client,
+      ev,
+      borrower,
+      'warning',
+      'Loan proposal expired',
+      `Proposal #${proposalId} expired without reaching quorum.`
+    )
+  },
+
   async interest(client, ev) {
     // Interest distribution carries no per-member breakdown, so there is still
     // nothing to attribute (per-member yield is surfaced via `claimed`). But
@@ -541,6 +561,7 @@ export async function applyEvent(client: PoolClient, ev: DecodedEvent): Promise<
     loan_edit: STREAM_CHANNELS.loan_proposals,
     loan_vote: STREAM_CHANNELS.loan_proposals,
     loan_appr: STREAM_CHANNELS.loan_proposals,
+    loan_exp: STREAM_CHANNELS.loan_proposals,
     loan_reject: STREAM_CHANNELS.loan_proposals,
     loan_disburse: STREAM_CHANNELS.loans,
     loan_repay: STREAM_CHANNELS.loans,

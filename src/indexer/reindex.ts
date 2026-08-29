@@ -31,6 +31,11 @@ export async function reindexFromEventLog(): Promise<{ events: number }> {
   const client: PoolClient = await pool.connect()
   try {
     await client.query('BEGIN')
+    // Issue #52: preserve user-authored notification read states across rebuilds
+    const { rows: savedReads } = await client.query<{ event_id: string; address: string }>(
+      `SELECT event_id, address FROM notifications WHERE read = true AND event_id IS NOT NULL`
+    )
+
     await client.query(`TRUNCATE ${DERIVED_TABLES.join(', ')} RESTART IDENTITY`)
     await resetDaoTotals(client)
 
@@ -54,6 +59,15 @@ export async function reindexFromEventLog(): Promise<{ events: number }> {
         fields: namedFields(row.symbol, data),
       }
       await applyEvent(client, ev)
+    }
+
+    if (savedReads.length > 0) {
+      for (const item of savedReads) {
+        await client.query(
+          `UPDATE notifications SET read = true WHERE event_id = $1 AND address = $2`,
+          [item.event_id, item.address]
+        )
+      }
     }
 
     await client.query('COMMIT')
