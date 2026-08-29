@@ -28,9 +28,11 @@ async function ingest(client: PoolClient, ev: DecodedEvent): Promise<void> {
 async function derivedSnapshot(): Promise<Record<string, unknown[]>> {
   const snap: Record<string, unknown[]> = {}
   
-  const stripTimestamps = (rows: any[]) => {
+  const stripTimestamps = (rows: Record<string, unknown>[]) => {
     return rows.map((r) => {
-      const { created_at, updated_at, ...rest } = r
+      const rest = { ...r }
+      delete rest.created_at
+      delete rest.updated_at
       return rest
     })
   }
