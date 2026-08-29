@@ -12,6 +12,7 @@ process.env.DATABASE_URL =
 // 'info' default would drown test output in per-request log lines.
 process.env.LOG_LEVEL ??= 'silent'
 
+// Run migrations before tests
 const { migrate } = await import('../src/db/migrate.js')
 await migrate()
 

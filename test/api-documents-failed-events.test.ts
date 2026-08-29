@@ -99,7 +99,8 @@ describe('API: GET /api/admin/failed-events (issue #43)', () => {
       `INSERT INTO failed_events (event_id, symbol, ledger, error) VALUES ('1-0', 'loan_dflt', 100, 'boom')`
     )
     const res = await app.inject({ method: 'GET', url: '/api/events' })
-    expect(res.json().events).toHaveLength(1)
-    expect(res.json().events[0].id).toBe('1-0')
+    const body = res.json()
+    expect(body.events).toHaveLength(1)
+    expect(body.events[0].id).toBe('1-0')
   })
 })

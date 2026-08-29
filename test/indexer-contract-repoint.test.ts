@@ -68,7 +68,7 @@ describe('indexer: contract repoint guard', () => {
     expect(await query('SELECT * FROM interest_distributions')).toEqual([])
     expect(await query('SELECT * FROM indexer_cursor')).toEqual([])
     // dao_totals must be zeroed, not left with the previous deployment's figures.
-    const totals = await pool.query<{ interest_collected: number; principal_lent: number; principal_repaid: number; value_defaulted: number }>(
+    const totals = await pool.query<{ interest_collected: string; principal_lent: string; principal_repaid: string; value_defaulted: string }>(
       'SELECT interest_collected, principal_lent, principal_repaid, value_defaulted FROM dao_totals WHERE id = 1'
     )
     expect(totals.rows[0]!.interest_collected).toBe('0')

@@ -225,12 +225,12 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
           'position', json_build_object(
             'contribution_share_bps', CASE 
               WHEN (SELECT total_contribution FROM totals) > 0 
-              THEN ((m.contribution * 10000) / (SELECT total_contribution FROM totals))::bigint::text 
+              THEN TRUNC((m.contribution * 10000) / (SELECT total_contribution FROM totals))::text 
               ELSE '0' 
             END,
             'stake_share_bps', CASE 
               WHEN (SELECT total_stake FROM totals) > 0 AND m.exited = false
-              THEN ((m.stake * 10000) / (SELECT total_stake FROM totals))::bigint::text 
+              THEN TRUNC((m.stake * 10000) / (SELECT total_stake FROM totals))::text 
               ELSE '0' 
             END,
             'repaid_loans_count', COALESCE((SELECT repaid_loans_count::int FROM member_loans), 0),
