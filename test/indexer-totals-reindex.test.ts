@@ -167,6 +167,43 @@ describe('indexer: reindex from the raw event log (issue #23)', () => {
 
     expect(after).toEqual(before)
   })
+
+  it('a rebuild with batched keyset pagination produces identical state across small batch sizes', async () => {
+    const events = [
+      decodedEvent('joined', { member: 'GB', fee: '100' }),
+      decodedEvent('staked', { member: 'GB', amount: '400', new_stake: '400' }),
+      decodedEvent('interest', { interest: '90', active: 2 }),
+      decodedEvent('loan_req', { id: 1, borrower: 'GB', amount: '1000', total_repayment: '1100' }),
+      decodedEvent('loan_vote', { proposal_id: 1, voter: 'GB', support: true }),
+      decodedEvent('loan_appr', { id: 1, borrower: 'GB', amount: '1000' }),
+      decodedEvent('loan_rpy', { loan_id: 1, borrower: 'GB', outstanding: '0' }),
+    ]
+    for (const ev of events) await ingest(client, ev)
+
+    const before = {
+      members: await query('SELECT address, contribution, stake, has_active_loan, defaults_count, exited FROM members ORDER BY address'),
+      loans: await query('SELECT id, borrower, amount, outstanding, total_repayment, status FROM loans ORDER BY id'),
+      proposals: await query('SELECT id, status, votes_for, voter_count FROM loan_proposals ORDER BY id'),
+      totals: await totals(),
+      interest: await query('SELECT event_id, amount, active_members FROM interest_distributions ORDER BY ledger'),
+    }
+
+    client.release()
+    // Test with small batch size of 2 to force multiple pagination roundtrips
+    const { events: replayed } = await reindexFromEventLog({ batchSize: 2 })
+    expect(replayed).toBe(events.length)
+    client = await pool.connect()
+
+    const after = {
+      members: await query('SELECT address, contribution, stake, has_active_loan, defaults_count, exited FROM members ORDER BY address'),
+      loans: await query('SELECT id, borrower, amount, outstanding, total_repayment, status FROM loans ORDER BY id'),
+      proposals: await query('SELECT id, status, votes_for, voter_count FROM loan_proposals ORDER BY id'),
+      totals: await totals(),
+      interest: await query('SELECT event_id, amount, active_members FROM interest_distributions ORDER BY ledger'),
+    }
+
+    expect(after).toEqual(before)
+  })
 })
 
 describe('indexer: ledger discontinuity detection (issue #23)', () => {
