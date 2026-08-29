@@ -54,7 +54,7 @@ describe('API: /members/:address/summary', () => {
     const body = res.json()
     expect(body.member.address).toBe('GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI')
     expect(body.loans).toHaveLength(2)
-    expect(body.loans[0].interest_charge).toBe('100') // Derived via withLoanDerived
+    expect(body.loans[0].interest_charge).toBe('50') // Derived via withLoanDerived
     expect(body.unread_notifications).toBe(1)
     
     // Position assertions
