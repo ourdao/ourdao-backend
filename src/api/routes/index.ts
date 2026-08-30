@@ -287,7 +287,8 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get('/proposals/loan', async (req, reply) => {
     reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
     const l = limit((req.query as Record<string, unknown>).limit)
-    return query<LoanProposalRow>('SELECT * FROM loan_proposals ORDER BY id DESC LIMIT $1', [l])
+    const rows = await query<LoanProposalRow>('SELECT * FROM loan_proposals ORDER BY id DESC LIMIT $1', [l])
+    return rows.map(r => ({ ...r, tallies_weighted: false }))
   })
 
   // --- Loans (optional ?borrower= filter, ?before=<id> cursor) ---
@@ -347,7 +348,8 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get('/proposals/treasury', async (req, reply) => {
     reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
     const l = limit((req.query as Record<string, unknown>).limit)
-    return query<TreasuryProposalRow>('SELECT * FROM treasury_proposals ORDER BY id DESC LIMIT $1', [l])
+    const rows = await query<TreasuryProposalRow>('SELECT * FROM treasury_proposals ORDER BY id DESC LIMIT $1', [l])
+    return rows.map(r => ({ ...r, tallies_weighted: false }))
   })
 
   // --- A treasury proposal's full event history (issue #26) ---
@@ -406,6 +408,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
 
     const symbol = typeof q.symbol === 'string' && q.symbol ? q.symbol : null
     const contract = typeof q.contract === 'string' && q.contract ? q.contract : null
+    const decodeError = q.decode_error === 'true'
 
     const conditions: string[] = []
     const params: unknown[] = []
@@ -416,6 +419,9 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     if (contract) {
       params.push(contract)
       conditions.push(`contract_id = $${params.length}`)
+    }
+    if (decodeError) {
+      conditions.push(`decode_error IS NOT NULL`)
     }
     if (before !== null) {
       if (before.id) {

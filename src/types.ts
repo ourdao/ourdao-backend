@@ -56,6 +56,7 @@ export interface LoanProposalRow {
   votes_for: string
   votes_against: string
   voter_count: number
+  tallies_weighted: boolean
   created_ledger: number | null
   updated_at: string
 }
@@ -83,6 +84,7 @@ export interface TreasuryProposalRow {
   votes_for: string
   votes_against: string
   voter_count: number
+  tallies_weighted: boolean
   created_ledger: number | null
   executed_ledger: number | null
   updated_at: string
@@ -111,6 +113,7 @@ export interface EventRow {
   topics: unknown
   data: unknown
   tx_hash: string | null
+  decode_error: string | null
   created_at: string
 }
 
