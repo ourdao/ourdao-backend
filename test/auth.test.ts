@@ -133,13 +133,16 @@ describe('MemoryNonceStore (#72)', () => {
     vi.useRealTimers()
   })
 
-  it('issue() returns a distinct 64-hex value per call and per address', async () => {
+  it('issue() returns the same nonce for the same address if not expired, distinct for different addresses', async () => {
     const store = new MemoryNonceStore()
     const a1 = await store.issue('GA')
     const a2 = await store.issue('GA')
     const b1 = await store.issue('GB')
     for (const n of [a1, a2, b1]) expect(n).toMatch(/^[0-9a-f]{64}$/)
-    expect(new Set([a1, a2, b1]).size).toBe(3)
+    // a1 and a2 should be the same (nonce not expired)
+    expect(a1).toBe(a2)
+    // b1 should be different (different address)
+    expect(b1).not.toBe(a1)
     await store.shutdown()
   })
 

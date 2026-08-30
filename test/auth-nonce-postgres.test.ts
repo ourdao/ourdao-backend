@@ -124,18 +124,22 @@ describe('PostgresNonceStore', () => {
     expect(successCount).toBe(1)
   })
 
-  it('replaces old nonce when a new one is issued for the same address', async () => {
+  it('returns same nonce when reissued for same address while still valid', async () => {
     const address = 'GBJCHUKZMTFSLOMNC7P4TS4VJJBTCYL3AESFVNUN3AHYJRULJLW7AUWQ'
     
     const nonce1 = await store.issue(address)
     const nonce2 = await store.issue(address)
     
-    // Only the second nonce should be valid
-    const consumed1 = await store.consume(address, nonce1)
-    expect(consumed1).toBe(false)
+    // Both should be the same nonce (nonce not expired yet)
+    expect(nonce1).toBe(nonce2)
     
+    // The nonce should still be valid and consumable
+    const consumed1 = await store.consume(address, nonce1)
+    expect(consumed1).toBe(true)
+    
+    // After consumption, nonce should be invalid
     const consumed2 = await store.consume(address, nonce2)
-    expect(consumed2).toBe(true)
+    expect(consumed2).toBe(false)
   })
 
   it('cleanup timer removes expired nonces', async () => {
