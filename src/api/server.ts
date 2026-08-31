@@ -12,6 +12,9 @@ import { MemoryNonceStore, PostgresNonceStore, type NonceStore } from '../auth.j
 import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
+// Stellar's nominal ledger close time, used to convert a lag in ledgers into
+// an estimated lag in seconds for the /ready readiness probe.
+const STELLAR_LEDGER_CLOSE_TIME_SECONDS = 5
 
 interface CursorRow {
   last_ledger: number | null
@@ -141,7 +144,7 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     const ledgersBehind = lastLedger != null && tipLedger != null && tipLedger > lastLedger
       ? tipLedger - lastLedger
       : null
-    const estimatedLagSeconds = ledgersBehind != null ? ledgersBehind * 5 : null
+    const estimatedLagSeconds = ledgersBehind != null ? ledgersBehind * STELLAR_LEDGER_CLOSE_TIME_SECONDS : null
 
     if (isStale) {
       return reply.code(503).send({
