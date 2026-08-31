@@ -83,6 +83,21 @@ describe('decodeEvent', () => {
       expect(Object.prototype.hasOwnProperty.call(EVENT_FIELDS, sym)).toBe(true)
     }
   })
+
+  it('captures topic decode error and flags the event', () => {
+    const data = tuple(nativeToScVal(1, { type: 'u32' }))
+    const evRaw = makeEvent('some_symbol', data)
+    evRaw.topic = [{} as xdr.ScVal]
+    const ev = decodeEvent(evRaw)
+    expect(ev.decodeError).toBeTruthy()
+    expect(ev.symbol).toBe('')
+  })
+
+  it('captures data decode error and flags the event', () => {
+    const evRaw = makeEvent('some_symbol', {} as xdr.ScVal)
+    const ev = decodeEvent(evRaw)
+    expect(ev.decodeError).toBeTruthy()
+  })
 })
 
 describe('toJsonSafe', () => {

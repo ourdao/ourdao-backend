@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS events (
   topics      JSONB NOT NULL,
   data        JSONB NOT NULL,
   tx_hash     TEXT,
+  decode_error TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS events_symbol_idx ON events (symbol);

@@ -27,10 +27,14 @@ async function ingest(client: PoolClient, ev: DecodedEvent): Promise<void> {
 
 async function derivedSnapshot(): Promise<Record<string, unknown[]>> {
   const snap: Record<string, unknown[]> = {}
-  for (const table of DERIVED_TABLES) {
-    snap[table] = await query(`SELECT * FROM ${table} ORDER BY 1`)
-  }
-  snap.dao_totals = await query('SELECT * FROM dao_totals ORDER BY id')
+  snap.members = await query('SELECT address, joined_ledger, contribution, exited, exit_share, exited_ledger, pending_claimed, stake, has_active_loan, name, defaults_count FROM members ORDER BY address')
+  snap.loan_proposals = await query('SELECT id, borrower, amount, total_repayment, status, votes_for, votes_against, voter_count, created_ledger FROM loan_proposals ORDER BY id')
+  snap.loans = await query('SELECT id, borrower, amount, outstanding, total_repayment, status, approved_ledger, due_time, repaid_ledger, defaulted_ledger FROM loans ORDER BY id')
+  snap.treasury_proposals = await query('SELECT id, amount, destination, private, status, votes_for, votes_against, voter_count, created_ledger, executed_ledger FROM treasury_proposals ORDER BY id')
+  snap.notifications = await query('SELECT address, type, title, message, ledger, tx_hash, read FROM notifications ORDER BY id')
+  snap.interest_distributions = await query('SELECT event_id, ledger, amount, active_members, tx_hash FROM interest_distributions ORDER BY id')
+  snap.documents = await query('SELECT event_id, proposal_id, kind, caller, ledger, tx_hash FROM documents ORDER BY id')
+  snap.dao_totals = await query('SELECT interest_collected, principal_lent, principal_repaid, value_defaulted FROM dao_totals WHERE id = 1')
   return snap
 }
 
@@ -62,6 +66,8 @@ describe('events log — storage shape is pinned (issue #75)', () => {
     )
     expect(idx.map((r) => r.indexname).sort()).toEqual([
       'events_contract_id_idx',
+      'events_data_gin_idx',
+      'events_entity_id_idx',
       'events_ledger_idx',
       'events_pkey',
       'events_symbol_idx',

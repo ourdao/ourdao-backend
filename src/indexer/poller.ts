@@ -6,6 +6,7 @@ import { server, getLatestLedger, getLatestLedgerInfo } from '../stellar/rpc.js'
 import { decodeEvent, type DecodedEvent } from '../stellar/events.js'
 import { applyEvent } from './handlers.js'
 import { DERIVED_TABLES, resetDaoTotals } from './derived-tables.js'
+import { REINDEX_LOCK_KEY } from './reindex.js'
 
 interface CursorRow {
   paging_token: string | null
@@ -41,16 +42,41 @@ export class ReorgDetectedError extends Error {
  *  INDEXER_RESET_ON_CONTRACT_CHANGE is set. */
 export async function resetForContractChange(): Promise<void> {
   const client = await pool.connect()
+  let lockAcquired = false
   try {
+    const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
+      'SELECT pg_try_advisory_lock($1)',
+      [REINDEX_LOCK_KEY]
+    )
+    if (!lockRes.rows[0]?.pg_try_advisory_lock) {
+      throw new Error(
+        'Cannot reset database for contract change: reindex or fold operation is currently in progress (advisory lock held)'
+      )
+    }
+    lockAcquired = true
+
     await client.query('BEGIN')
     await client.query(`TRUNCATE ${DERIVED_TABLES.join(', ')} RESTART IDENTITY`)
     await resetDaoTotals(client)
     await client.query('DELETE FROM indexer_cursor WHERE id = 1')
     await client.query('COMMIT')
   } catch (err) {
-    await client.query('ROLLBACK')
+    if (lockAcquired) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        // Rollback failure ignored
+      }
+    }
     throw err
   } finally {
+    if (lockAcquired) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+      } catch (err) {
+        console.error('[indexer] failed to release advisory lock:', err)
+      }
+    }
     client.release()
   }
 }
@@ -139,10 +165,10 @@ async function resolveStartLedger(): Promise<number> {
  *  quarantine path (issue #43) so both write the same row the same way. */
 async function insertRawEvent(client: PoolClient, ev: DecodedEvent): Promise<boolean> {
   const ins = await client.query(
-    `INSERT INTO events (id, ledger, closed_at, contract_id, symbol, topics, data, tx_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO events (id, ledger, closed_at, contract_id, symbol, topics, data, tx_hash, decode_error)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (id) DO NOTHING`,
-    [ev.id, ev.ledger, ev.closedAt, ev.contractId, ev.symbol, JSON.stringify(ev.topics), JSON.stringify(ev.data), ev.txHash]
+    [ev.id, ev.ledger, ev.closedAt, ev.contractId, ev.symbol, JSON.stringify(ev.topics), JSON.stringify(ev.data), ev.txHash, ev.decodeError ?? null]
   )
   return ins.rowCount === 1
 }
@@ -157,7 +183,19 @@ async function insertRawEvent(client: PoolClient, ev: DecodedEvent): Promise<boo
 async function ingestPage(events: rpc.Api.EventResponse[], lastLedger: number): Promise<void> {
   if (events.length === 0) return
   const client = await pool.connect()
+  let lockAcquired = false
   try {
+    const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
+      'SELECT pg_try_advisory_lock($1)',
+      [REINDEX_LOCK_KEY]
+    )
+    if (!lockRes.rows[0]?.pg_try_advisory_lock) {
+      throw new Error(
+        'Cannot ingest events: reindex is currently in progress (advisory lock held)'
+      )
+    }
+    lockAcquired = true
+
     await client.query('BEGIN')
     for (const raw of events) {
       const ev = decodeEvent(raw)
@@ -182,9 +220,22 @@ async function ingestPage(events: rpc.Api.EventResponse[], lastLedger: number): 
     }
     await client.query('COMMIT')
   } catch (err) {
-    await client.query('ROLLBACK')
+    if (lockAcquired) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        // Rollback failure ignored
+      }
+    }
     throw err
   } finally {
+    if (lockAcquired) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+      } catch (err) {
+        console.error('[indexer] failed to release advisory lock:', err)
+      }
+    }
     client.release()
   }
 }
@@ -214,25 +265,40 @@ async function ingestEventQuarantined(ev: DecodedEvent, lastLedger: number): Pro
     )
   }
 
-  const rawClient = await pool.connect()
-  let isNew: boolean
+  const client = await pool.connect()
+  let lockAcquired = false
   try {
-    isNew = await insertRawEvent(rawClient, ev)
-  } finally {
-    rawClient.release()
-  }
-  if (!isNew) return // already folded by an earlier attempt at this page
+    const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
+      'SELECT pg_try_advisory_lock($1)',
+      [REINDEX_LOCK_KEY]
+    )
+    if (!lockRes.rows[0]?.pg_try_advisory_lock) {
+      throw new Error(
+        'Cannot fold quarantined event: reindex is currently in progress (advisory lock held)'
+      )
+    }
+    lockAcquired = true
 
-  const foldClient = await pool.connect()
-  try {
-    await foldClient.query('BEGIN')
-    await applyEvent(foldClient, ev)
-    await foldClient.query('COMMIT')
-  } catch (err) {
-    await foldClient.query('ROLLBACK')
-    await recordQuarantinedEvent(ev, err)
+    const isNew = await insertRawEvent(client, ev)
+    if (!isNew) return // already folded by an earlier attempt at this page
+
+    try {
+      await client.query('BEGIN')
+      await applyEvent(client, ev)
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      await recordQuarantinedEvent(ev, err)
+    }
   } finally {
-    foldClient.release()
+    if (lockAcquired) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+      } catch (err) {
+        console.error('[indexer] failed to release advisory lock:', err)
+      }
+    }
+    client.release()
   }
 }
 

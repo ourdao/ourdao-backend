@@ -49,18 +49,36 @@ export class MemoryNonceStore implements NonceStore {
   }
 
   async issue(address: string): Promise<string> {
-    // Generate a random 32-byte nonce (64 hex chars)
-    const nonce = randomBytes(32).toString('hex')
+    const now = Date.now()
+    
+    // Check if we already have an unexpired nonce for this address
+    const existingEntry = this.store.get(address)
+    if (existingEntry) {
+      if (existingEntry.expiresAt > now) {
+        // Nonce is still valid - return existing one
+        // This prevents an attacker from invalidating a victim's nonce
+        // and also prevents self-invalidation from multiple tabs
+        console.debug(`[auth] Returning existing nonce for ${address}, expires in ${Math.floor((existingEntry.expiresAt - now) / 1000)}s`)
+        return existingEntry.nonce
+      } else {
+        // Nonce has expired, clean it up
+        this.store.delete(address)
+      }
+    }
     
     // If we're at capacity, reject new challenges to prevent DoS
     if (this.store.size >= this.MAX_ENTRIES) {
       throw new Error('Nonce store capacity exceeded')
     }
     
+    // Generate a random 32-byte nonce (64 hex chars)
+    const nonce = randomBytes(32).toString('hex')
+    
     this.store.set(address, {
       nonce,
-      expiresAt: Date.now() + this.TTL_MS
+      expiresAt: now + this.TTL_MS
     })
+    
     return nonce
   }
 
@@ -116,10 +134,25 @@ export class PostgresNonceStore implements NonceStore {
   }
 
   async issue(address: string): Promise<string> {
-    const nonce = randomBytes(32).toString('hex')
+    // First, check if there's an existing unexpired nonce
+    const existingResult = await this.pool.query(
+      `SELECT nonce FROM auth_nonces 
+       WHERE address = $1 AND expires_at > now()`,
+      [address]
+    )
+    
+    if (existingResult.rows.length > 0) {
+      // Nonce is still valid - return existing one
+      // This prevents an attacker from invalidating a victim's nonce
+      // and also prevents self-invalidation from multiple tabs
+      console.debug(`[auth] Returning existing nonce for ${address}`)
+      return existingResult.rows[0].nonce
+    }
+    
     const expiresAt = new Date(Date.now() + this.TTL_MS)
-
-    // Insert the nonce. If an address already has a nonce, replace it (UPSERT via ON CONFLICT)
+    const nonce = randomBytes(32).toString('hex')
+    
+    // Insert the nonce. If an address already has a nonce (but expired), replace it
     await this.pool.query(
       `INSERT INTO auth_nonces (address, nonce, expires_at) 
        VALUES ($1, $2, $3)

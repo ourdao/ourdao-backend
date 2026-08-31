@@ -15,3 +15,5 @@ process.env.LOG_LEVEL ??= 'silent'
 // Run migrations before tests
 const { migrate } = await import('../src/db/migrate.js')
 await migrate()
+
+export {}

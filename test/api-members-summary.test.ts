@@ -1,8 +1,13 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
+import { Keypair } from '@stellar/stellar-sdk'
 import { buildServer } from '../src/api/server.js'
 import { query } from '../src/db/index.js'
 import { closeDb, resetDb } from './db.js'
+
+const MEMBER_A = Keypair.random().publicKey()
+const MEMBER_B = Keypair.random().publicKey()
+const NOBODY = Keypair.random().publicKey()
 
 describe('API: /members/:address/summary', () => {
   let app: FastifyInstance
@@ -54,7 +59,10 @@ describe('API: /members/:address/summary', () => {
     const body = res.json()
     expect(body.member.address).toBe('GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3')
     expect(body.loans).toHaveLength(2)
-    expect(body.loans[0].interest_charge).toBe('100') // Derived via withLoanDerived
+    const loan1 = body.loans.find((l: { id: number }) => l.id === 1)
+    const loan2 = body.loans.find((l: { id: number }) => l.id === 2)
+    expect(loan1.interest_charge).toBe('100') // Derived via withLoanDerived
+    expect(loan2.interest_charge).toBe('50')
     expect(body.unread_notifications).toBe(1)
     
     // Position assertions
