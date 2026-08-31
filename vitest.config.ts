@@ -12,12 +12,7 @@ export default defineConfig({
     // `resetDb()` TRUNCATE race another file's in-flight assertions —
     // observed as flaky failures. Serialize file execution instead.
     fileParallelism: false,
-    pool: 'forks',
-    poolOptions: {
-      forks: {
-        singleFork: true,
-      },
-    },
+
     // Coverage measurement (#79). `npm run test:coverage` writes a per-file
     // report; CI enforces the thresholds below and prints the summary to the
     // job output. v8 instrumentation adds little here because the tests are

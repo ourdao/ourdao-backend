@@ -15,7 +15,7 @@ describe('API: ETags and Caching', () => {
     // Seed some data
     await query(`
       INSERT INTO members (address, joined_ledger, contribution, stake, exited)
-      VALUES ('GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI', 100, '5000', '1000', false)
+      VALUES ('GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3', 100, '5000', '1000', false)
     `)
   })
   afterAll(closeDb)
@@ -62,7 +62,7 @@ describe('API: ETags and Caching', () => {
   })
   
   it('sets private no-cache for per-address queries', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/notifications?address=GAOEMNVGFX7CXSGGFLMXCWYB4UPJLOZ2NLSHS3OMR2MFI6OJ2YWDYJTI' })
+    const res = await app.inject({ method: 'GET', url: '/api/notifications?address=GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3' })
     expect(res.statusCode).toBe(200)
     expect(res.headers['cache-control']).toBe('private, no-cache')
   })

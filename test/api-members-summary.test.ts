@@ -27,7 +27,7 @@ describe('API: /members/:address/summary', () => {
   afterAll(closeDb)
 
   it('GET /api/members/:address/summary returns 404 for unknown address', async () => {
-    const res = await app.inject({ method: 'GET', url: `/api/members/${NOBODY}/summary` })
+    const res = await app.inject({ method: 'GET', url: '/api/members/GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3/summary' })
     expect(res.statusCode).toBe(404)
   })
 
@@ -35,29 +35,29 @@ describe('API: /members/:address/summary', () => {
     await query(`
       INSERT INTO members (address, joined_ledger, contribution, stake, exited)
       VALUES 
-      ($1, 100, '5000', '1000', false),
-      ($2, 100, '5000', '1000', false)
-    `, [MEMBER_A, MEMBER_B])
+      ('GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3', 100, '5000', '1000', false),
+      ('GD2XX', 100, '5000', '1000', false)
+    `)
 
     await query(`
       INSERT INTO loans (id, borrower, amount, outstanding, total_repayment, status)
       VALUES 
-      (1, $1, '1000', '1000', '1100', 'active'),
-      (2, $1, '500', '0', '550', 'repaid')
-    `, [MEMBER_A])
+      (1, 'GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3', '1000', '1000', '1100', 'active'),
+      (2, 'GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3', '500', '0', '550', 'repaid')
+    `)
 
     await query(`
       INSERT INTO notifications (address, type, title, message, read)
       VALUES 
-      ($1, 'info', 'Test', 'Msg', false),
-      ($1, 'info', 'Test 2', 'Msg 2', true)
-    `, [MEMBER_A])
+      ('GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3', 'info', 'Test', 'Msg', false),
+      ('GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3', 'info', 'Test 2', 'Msg 2', true)
+    `)
 
-    const res = await app.inject({ method: 'GET', url: `/api/members/${MEMBER_A}/summary` })
+    const res = await app.inject({ method: 'GET', url: '/api/members/GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3/summary' })
     expect(res.statusCode).toBe(200)
     
     const body = res.json()
-    expect(body.member.address).toBe(MEMBER_A)
+    expect(body.member.address).toBe('GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3')
     expect(body.loans).toHaveLength(2)
     const loan1 = body.loans.find((l: { id: number }) => l.id === 1)
     const loan2 = body.loans.find((l: { id: number }) => l.id === 2)
@@ -76,9 +76,9 @@ describe('API: /members/:address/summary', () => {
   it('GET /api/members/:address/summary handles exited member position correctly', async () => {
     await query(`
       INSERT INTO members (address, joined_ledger, contribution, stake, exited)
-      VALUES ($1, 100, '5000', '1000', true)
-    `, [MEMBER_A])
-    const res = await app.inject({ method: 'GET', url: `/api/members/${MEMBER_A}/summary` })
+      VALUES ('GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3', 100, '5000', '1000', true)
+    `)
+    const res = await app.inject({ method: 'GET', url: '/api/members/GBIU43K4ICLBGTVHSQJH7F37Y6R6IAGAGJJTNZGJV2GD4V3PD4DG42R3/summary' })
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.position.stake_share_bps).toBe('0') // Exited member has 0% stake share
