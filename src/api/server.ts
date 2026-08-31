@@ -60,9 +60,9 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
   // Select nonce store implementation based on config (issue #66)
   let nonceStore: NonceStore
   if (config.db.nonceStore === 'postgres') {
-    nonceStore = new PostgresNonceStore(pool)
+    nonceStore = new PostgresNonceStore(pool, app.log)
   } else {
-    nonceStore = new MemoryNonceStore()
+    nonceStore = new MemoryNonceStore(app.log)
   }
 
   await app.register(etag)

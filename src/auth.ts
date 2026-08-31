@@ -8,14 +8,26 @@ export interface NonceStore {
   consume(address: string, nonce: string): Promise<boolean>
 }
 
+
+export interface Logger {
+  debug(msg: string, ...args: unknown[]): void
+  warn(msg: string, ...args: unknown[]): void
+}
+
+function formatAddress(address: string): string {
+  return address.length > 8 ? address.slice(0, 4) + '...' + address.slice(-4) : address
+}
+
 // In-memory nonce store for development
 export class MemoryNonceStore implements NonceStore {
   private store = new Map<string, { nonce: string; expiresAt: number }>()
+  private readonly log: Logger
   private readonly TTL_MS = 5 * 60 * 1000 // 5 minutes
   private readonly MAX_ENTRIES = 10000 // Hard cap on stored entries
   private sweepTimer: NodeJS.Timeout | null = null
 
-  constructor() {
+  constructor(logger?: Logger) {
+    this.log = logger ?? console
     // Start periodic sweep of expired entries, unref'd so it doesn't hold process open
     this.startSweep()
   }
@@ -58,7 +70,7 @@ export class MemoryNonceStore implements NonceStore {
         // Nonce is still valid - return existing one
         // This prevents an attacker from invalidating a victim's nonce
         // and also prevents self-invalidation from multiple tabs
-        console.debug(`[auth] Returning existing nonce for ${address}, expires in ${Math.floor((existingEntry.expiresAt - now) / 1000)}s`)
+        this.log.debug(`[auth] Returning existing nonce for ${formatAddress(address)}, expires in ${Math.floor((existingEntry.expiresAt - now) / 1000)}s`)
         return existingEntry.nonce
       } else {
         // Nonce has expired, clean it up
@@ -100,10 +112,12 @@ export class MemoryNonceStore implements NonceStore {
 // even with concurrent requests across multiple API instances.
 export class PostgresNonceStore implements NonceStore {
   private pool: Pool
+  private readonly log: Logger
   private readonly TTL_MS = 5 * 60 * 1000 // 5 minutes
   private cleanupTimer: NodeJS.Timeout | null = null
 
-  constructor(pool: Pool) {
+  constructor(pool: Pool, logger?: Logger) {
+    this.log = logger ?? console
     this.pool = pool
     this.startCleanup()
   }
@@ -117,7 +131,7 @@ export class PostgresNonceStore implements NonceStore {
         )
       } catch (error) {
         // Log but don't throw - cleanup failure shouldn't crash the process
-        console.warn(`[auth] expired-nonce cleanup failed: ${(error as Error).message}`)
+        this.log.warn(`[auth] expired-nonce cleanup failed: ${(error as Error).message}`)
       }
     }, 10 * 60 * 1000) // Every 10 minutes
     // Unref the timer so it doesn't prevent graceful shutdown
@@ -145,7 +159,7 @@ export class PostgresNonceStore implements NonceStore {
       // Nonce is still valid - return existing one
       // This prevents an attacker from invalidating a victim's nonce
       // and also prevents self-invalidation from multiple tabs
-      console.debug(`[auth] Returning existing nonce for ${address}`)
+      this.log.debug(`[auth] Returning existing nonce for ${formatAddress(address)}`)
       return existingResult.rows[0].nonce
     }
     
