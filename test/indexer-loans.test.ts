@@ -193,6 +193,50 @@ describe('indexer handlers: loans', () => {
     expect(notifs).toHaveLength(1)
   })
 
+  it('loan_exp transitions proposal status from pending to rejected and notifies borrower', async () => {
+    await applyEvent(client, decodedEvent('joined', { member: 'GBORROWER', fee: '500' }))
+    await applyEvent(
+      client,
+      decodedEvent('loan_req', { id: 80, borrower: 'GBORROWER', amount: '1000', total_repayment: '1100' })
+    )
+
+    const expEv = decodedEvent('loan_exp', { proposal_id: 80, borrower: 'GBORROWER' })
+    await applyEvent(client, expEv)
+
+    const proposals = await query<LoanProposalRow>('SELECT * FROM loan_proposals WHERE id = 80')
+    expect(proposals[0]?.status).toBe('rejected')
+
+    const notifs = await query<{ title: string; type: string }>(
+      'SELECT title, type FROM notifications WHERE address = $1 AND type = $2',
+      ['GBORROWER', 'warning']
+    )
+    expect(notifs).toHaveLength(1)
+    expect(notifs[0]?.title).toBe('Loan proposal expired')
+  })
+
+  it('re-delivering loan_exp is idempotent and loan_exp for unknown proposal is a no-op', async () => {
+    await applyEvent(client, decodedEvent('joined', { member: 'GBORROWER', fee: '500' }))
+    await applyEvent(
+      client,
+      decodedEvent('loan_req', { id: 81, borrower: 'GBORROWER', amount: '1000', total_repayment: '1100' })
+    )
+
+    const expEv = decodedEvent('loan_exp', { proposal_id: 81, borrower: 'GBORROWER' })
+    await applyEvent(client, expEv)
+    await applyEvent(client, expEv) // re-delivery
+
+    const proposals = await query<LoanProposalRow>('SELECT * FROM loan_proposals WHERE id = 81')
+    expect(proposals[0]?.status).toBe('rejected')
+
+    const notifs = await query('SELECT * FROM notifications WHERE address = $1 AND type = $2', ['GBORROWER', 'warning'])
+    expect(notifs).toHaveLength(1)
+
+    // Unknown proposal id is a no-op, doesn't throw
+    await expect(
+      applyEvent(client, decodedEvent('loan_exp', { proposal_id: 99999, borrower: 'GBORROWER' }))
+    ).resolves.toBeUndefined()
+  })
+
   it('interest is a documented no-op (no per-member payload to apply)', async () => {
     await expect(
       applyEvent(client, decodedEvent('interest', { interest: '500', active: 10 }))
