@@ -1,4 +1,5 @@
 import { Keypair, StrKey, MuxedAccount } from '@stellar/stellar-sdk'
+import { logger, formatAddress } from './lib/logger.js'
 import { randomBytes } from 'crypto'
 import type { Pool } from 'pg'
 
@@ -58,7 +59,7 @@ export class MemoryNonceStore implements NonceStore {
         // Nonce is still valid - return existing one
         // This prevents an attacker from invalidating a victim's nonce
         // and also prevents self-invalidation from multiple tabs
-        console.debug(`[auth] Returning existing nonce for ${address}, expires in ${Math.floor((existingEntry.expiresAt - now) / 1000)}s`)
+        logger.debug('Returning existing nonce', { address: formatAddress(address), expiresInSeconds: Math.floor((existingEntry.expiresAt - now) / 1000) })
         return existingEntry.nonce
       } else {
         // Nonce has expired, clean it up
@@ -145,7 +146,7 @@ export class PostgresNonceStore implements NonceStore {
       // Nonce is still valid - return existing one
       // This prevents an attacker from invalidating a victim's nonce
       // and also prevents self-invalidation from multiple tabs
-      console.debug(`[auth] Returning existing nonce for ${address}`)
+      logger.debug('Returning existing nonce', { address: formatAddress(address) })
       return existingResult.rows[0].nonce
     }
     
