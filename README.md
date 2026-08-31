@@ -217,6 +217,21 @@ Base path: `/api`.
 
 All list endpoints accept `?limit=` (default 50, max 200). `?before=` and `?after=` are cursors: pass the `id` (or `ledger`) of the last row you saw to page. For `/api/events`, the cursor can be a deterministic `(ledger, id)` value (the event `id` string itself contains both) and ordering is strictly deterministic (`ledger DESC, id DESC` by default, or `ASC`). On-chain `i128` amounts are returned as decimal **strings** to preserve precision (see [Database schema](#database-schema)); ledger sequence numbers are returned as regular JSON numbers.
 
+### Errors
+
+Every error response — a deliberate `4xx` from a route, a failed request body, or anything thrown while handling the request — uses one shape:
+
+```json
+{ "error": "loan not found", "correlationId": "b1f2c3d4-..." }
+```
+
+- **`error`** is a short, safe, human-readable string. It never contains a stack trace, SQL, or raw database driver text. Deliberate `4xx` messages (`invalid loan id`, `address query param is required`, …) are passed through unchanged; every `5xx` is a generic string (`internal server error`) with the real cause written only to the server log.
+- **`correlationId`** is the request id. It is also returned in the `x-correlation-id` response header (on success and failure alike) and printed as `reqId` on the matching server-side log line, so a user-reported failure can be traced to its log entry.
+
+Postgres failures are mapped to a sensible status rather than an opaque `500`: a unique violation → `409`, a check violation or missing required value → `422`, and a connection failure → `503`. The driver's message (which would name columns, constraints and types) is logged, never returned.
+
+> `429` responses from the rate limiter (`@fastify/rate-limit`) keep that plugin's own body shape (`{ statusCode, error, message }`) and are the one exception to the envelope above.
+
 ### Caching
 
 All `GET` endpoints support `ETag` and conditional requests (`If-None-Match`), returning `304 Not Modified` when the underlying data is unchanged. `Cache-Control` headers are set appropriately:

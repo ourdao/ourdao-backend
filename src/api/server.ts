@@ -1,9 +1,11 @@
-import Fastify, { type FastifyInstance } from 'fastify'
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
+import { randomUUID } from 'node:crypto'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import etag from '@fastify/etag'
 import { config } from '../config.js'
 import { pool } from '../db/index.js'
+import { registerErrorHandling } from './errors.js'
 import { registerRoutes } from './routes/index.js'
 import { registerStreamEndpoint } from './stream.js'
 import { MemoryNonceStore, PostgresNonceStore, type NonceStore } from '../auth.js'
@@ -33,11 +35,27 @@ function readPackageVersion(): string {
   }
 }
 
-export async function buildServer(): Promise<FastifyInstance> {
+export interface BuildServerOptions {
+  /**
+   * Override the Fastify logger. Production passes nothing and gets the
+   * configured Pino logger; tests pass a capturing stream to assert that a
+   * failure's full detail (and its correlation id) reach the log.
+   */
+  logger?: FastifyServerOptions['logger']
+}
+
+export async function buildServer(opts: BuildServerOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: { level: config.http.logLevel },
+    logger: opts.logger ?? { level: config.http.logLevel },
     trustProxy: config.http.trustProxy === 'true',
+    // The request id doubles as the error-envelope correlation id (issue #81),
+    // so make it a random uuid rather than the default per-process counter.
+    genReqId: () => randomUUID(),
   })
+
+  // One error shape for every failure — installed before routes so every child
+  // context inherits it (issue #81).
+  registerErrorHandling(app)
 
   // Select nonce store implementation based on config (issue #66)
   let nonceStore: NonceStore
