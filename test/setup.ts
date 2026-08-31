@@ -13,5 +13,5 @@ process.env.DATABASE_URL =
 process.env.LOG_LEVEL ??= 'silent'
 
 // Run migrations before tests
-import { migrate } from '../src/db/migrate.js'
+const { migrate } = await import('../src/db/migrate.js')
 await migrate()

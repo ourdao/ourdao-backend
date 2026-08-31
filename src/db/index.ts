@@ -28,8 +28,14 @@ const scopedGetTypeParser = ((oid: number, format?: 'text' | 'binary') =>
 
 // A single shared pool. pg picks up PG* env vars automatically; a
 // DATABASE_URL connection string takes precedence when provided.
+const connectionString =
+  config.db.connectionString ||
+  process.env.DATABASE_URL ||
+  process.env.TEST_DATABASE_URL ||
+  (process.env.NODE_ENV === 'test' || process.env.VITEST ? 'postgres://ourdao:ourdao@localhost:5432/ourdao_test' : undefined)
+
 export const pool = new Pool({
-  ...(config.db.connectionString ? { connectionString: config.db.connectionString } : {}),
+  ...(connectionString ? { connectionString } : {}),
   types: { getTypeParser: scopedGetTypeParser },
 })
 
