@@ -18,6 +18,17 @@ export function bool(env: NodeJS.ProcessEnv, name: string, fallback = false): bo
   return v === 'true' || v === '1'
 }
 
+/** Pino log levels as documented at https://getpino.io/#/docs/api?id=level */
+const PINO_LEVELS = new Set(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
+
+/** Parse a log level string, falling back to 'info' if invalid or empty. */
+export function logLevel(env: NodeJS.ProcessEnv, name: string, fallback = 'info'): string {
+  const v = env[name]
+  if (v === undefined || v === '') return fallback
+  const level = v.trim().toLowerCase()
+  return PINO_LEVELS.has(level) ? level : fallback
+}
+
 /**
  * Parse the CORS_ORIGIN env var into a Fastify-compatible origin value.
  *
@@ -53,6 +64,9 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // INDEXER_STALE_AFTER_MS. In-process only: with more than one API
     // instance they may briefly disagree.
     statsCacheMs: int(env, 'STATS_CACHE_MS', 5_000),
+    // Pino log level for the Fastify server (fatal, error, warn, info, debug, trace, silent).
+    // 'silent' suppresses all request logging, which the test harness uses.
+    logLevel: logLevel(env, 'LOG_LEVEL', 'info'),
   },
   db: {
     // pg reads PG* env vars automatically; connectionString wins when set.
