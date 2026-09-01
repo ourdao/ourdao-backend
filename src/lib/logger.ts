@@ -21,7 +21,7 @@ const LEVELS: Record<string, number> = {
 }
 
 const configuredLevel = logLevel(process.env, 'LOG_LEVEL', 'info')
-const currentLevel = LEVELS[configuredLevel] ?? LEVELS.info
+const currentLevel: number = LEVELS[configuredLevel] ?? LEVELS.info ?? 0
 
 function log(level: string, message: string, extra: Record<string, unknown> = {}) {
   if ((LEVELS[level] ?? 0) > currentLevel) return
