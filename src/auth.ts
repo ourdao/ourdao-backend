@@ -333,7 +333,7 @@ export async function authenticateRequest(
 
   // If a target address is provided, ensure it matches the authenticated address
   if (targetAddress && targetAddress !== address) {
-    return { authenticated: false, status: 401, error: 'Cannot modify notifications for another address' }
+    return { authenticated: false, status: 403, error: 'Cannot modify notifications for another address' }
   }
 
   return { authenticated: true, address }
