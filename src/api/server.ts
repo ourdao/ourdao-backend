@@ -141,7 +141,11 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     const ledgersBehind = lastLedger != null && tipLedger != null && tipLedger > lastLedger
       ? tipLedger - lastLedger
       : null
-    const estimatedLagSeconds = ledgersBehind != null ? ledgersBehind * 5 : null
+// Stellar's nominal ledger close time, used to convert ledgers-behind
+// into an operator-friendly lag estimate on the /ready health endpoint.
+const LEDGER_CLOSE_TIME_SECONDS = 5
+
+    const estimatedLagSeconds = ledgersBehind != null ? ledgersBehind * LEDGER_CLOSE_TIME_SECONDS : null
 
     if (isStale) {
       return reply.code(503).send({
