@@ -161,11 +161,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
     
-    // Bound the request: reject over-long address (issue #65)
-    const MAX_ADDRESS_LENGTH = 56 // Stellar public keys are 56 characters
-    if (address.length > MAX_ADDRESS_LENGTH) {
-      return reply.code(400).send({ error: 'address too long' })
-    }
+
     
     try {
       const nonce = await nonceStore.issue(address)
