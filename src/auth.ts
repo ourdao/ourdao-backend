@@ -3,8 +3,12 @@ import { randomBytes } from 'crypto'
 import type { Pool } from 'pg'
 
 // Nonce storage interface - in production this would use Redis or similar
+export interface LoggerLike {
+  debug(msg: string): void
+}
+
 export interface NonceStore {
-  issue(address: string): Promise<string>
+  issue(address: string, log?: LoggerLike): Promise<string>
   consume(address: string, nonce: string): Promise<boolean>
 }
 
@@ -48,7 +52,7 @@ export class MemoryNonceStore implements NonceStore {
     }
   }
 
-  async issue(address: string): Promise<string> {
+  async issue(address: string, log?: LoggerLike): Promise<string> {
     const now = Date.now()
     
     // Check if we already have an unexpired nonce for this address
@@ -58,7 +62,7 @@ export class MemoryNonceStore implements NonceStore {
         // Nonce is still valid - return existing one
         // This prevents an attacker from invalidating a victim's nonce
         // and also prevents self-invalidation from multiple tabs
-        console.debug(`[auth] Returning existing nonce for ${address}, expires in ${Math.floor((existingEntry.expiresAt - now) / 1000)}s`)
+        log?.debug(`[auth] Returning existing nonce for ${address}, expires in ${Math.floor((existingEntry.expiresAt - now) / 1000)}s`)
         return existingEntry.nonce
       } else {
         // Nonce has expired, clean it up
@@ -133,7 +137,7 @@ export class PostgresNonceStore implements NonceStore {
     }
   }
 
-  async issue(address: string): Promise<string> {
+  async issue(address: string, log?: LoggerLike): Promise<string> {
     // First, check if there's an existing unexpired nonce
     const existingResult = await this.pool.query(
       `SELECT nonce FROM auth_nonces 
@@ -145,7 +149,7 @@ export class PostgresNonceStore implements NonceStore {
       // Nonce is still valid - return existing one
       // This prevents an attacker from invalidating a victim's nonce
       // and also prevents self-invalidation from multiple tabs
-      console.debug(`[auth] Returning existing nonce for ${address}`)
+      log?.debug(`[auth] Returning existing nonce for ${address}`)
       return existingResult.rows[0].nonce
     }
     
