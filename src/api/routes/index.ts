@@ -168,7 +168,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     }
     
     try {
-      const nonce = await nonceStore.issue(address)
+      const nonce = await nonceStore.issue(address, req.log)
       return { nonce }
     } catch (error) {
       // Nonce store capacity exceeded
