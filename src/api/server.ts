@@ -23,6 +23,10 @@ interface PackageJson {
   version: string
 }
 
+// Stellar's nominal ledger close interval in seconds.
+// Used by the /ready endpoint to convert ledgers-behind into estimated lag time.
+const STELLAR_LEDGER_CLOSE_TIME_SECONDS = 5
+
 // Helper to read package.json version
 function readPackageVersion(): string {
   try {
@@ -141,7 +145,7 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     const ledgersBehind = lastLedger != null && tipLedger != null && tipLedger > lastLedger
       ? tipLedger - lastLedger
       : null
-    const estimatedLagSeconds = ledgersBehind != null ? ledgersBehind * 5 : null
+    const estimatedLagSeconds = ledgersBehind != null ? ledgersBehind * STELLAR_LEDGER_CLOSE_TIME_SECONDS : null
 
     if (isStale) {
       return reply.code(503).send({
