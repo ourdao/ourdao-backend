@@ -455,8 +455,9 @@ export async function fetchOnce(contractId: string): Promise<void> {
       break
     }
 
-    // Build next request from the response cursor
-    currentRequest = { ...base, cursor: res.cursor }
+    // Build next request from the same token we persisted, so an interrupted
+    // drain resumes from exactly where we were reading (issue #138).
+    currentRequest = { ...base, cursor: nextToken }
   }
 
   // On a genuinely idle contract with nothing new to report (no events, and
