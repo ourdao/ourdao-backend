@@ -319,16 +319,18 @@ export async function authenticateRequest(
     return { authenticated: false, status: 401, error: 'Missing authentication headers' }
   }
 
+  // Verify the signature first. A bogus request must not consume the nonce,
+  // otherwise an attacker can burn a victim's live challenge and lock them out
+  // (issue #115). The nonce is only consumed once the signature is valid.
+  const sig = verifySignature(address, nonce, signature)
+  if (!sig.ok) {
+    return { authenticated: false, status: sig.status, error: sig.error }
+  }
+
   // Check if the nonce is valid and hasn't been used
   const nonceValid = await nonceStore.consume(address, nonce)
   if (!nonceValid) {
     return { authenticated: false, status: 401, error: 'Invalid or expired nonce' }
-  }
-
-  // Verify the signature
-  const sig = verifySignature(address, nonce, signature)
-  if (!sig.ok) {
-    return { authenticated: false, status: sig.status, error: sig.error }
   }
 
   // If a target address is provided, ensure it matches the authenticated address
