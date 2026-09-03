@@ -288,7 +288,18 @@ async function ingestEventQuarantined(ev: DecodedEvent, lastLedger: number): Pro
       await client.query('COMMIT')
     } catch (err) {
       await client.query('ROLLBACK')
-      await recordQuarantinedEvent(ev, err)
+      // Bookkeeping must not strand the event. If recording the failure itself
+      // throws (constraint violation, connection reset, disk full), log loudly
+      // and continue so the cursor still advances past this event. The raw log
+      // row already committed above, and the derived tables were rolled back.
+      try {
+        await recordQuarantinedEvent(ev, err)
+      } catch (recordErr) {
+        console.error(
+          `[indexer] failed to record quarantined event ${ev.id} (${ev.symbol}) at ledger ${ev.ledger}:` ,
+          recordErr instanceof Error ? recordErr.message : String(recordErr)
+        )
+      }
     }
   } finally {
     if (lockAcquired) {
