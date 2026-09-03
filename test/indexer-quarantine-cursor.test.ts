@@ -127,6 +127,44 @@ describe('indexer: quarantine after repeated same-page failures (issue #43)', ()
     expect(await query('SELECT * FROM events')).toHaveLength(0)
   })
 })
+  it('continues past a failed failed_events insert so a bookkeeping error does not strand the page (issue #120)', async () => {
+    const good = decodedEvent('joined', { member: 'GA', fee: '10' })
+    const bad = decodedEvent('loan_dflt', { loan_id: 1, borrower: 'GA' })
+    const page = [good, bad]
+    getEventsMock.mockResolvedValue({ events: page, cursor: 'tok-after', latestLedger: 100_000 })
+
+    // First two attempts are still treated as transient whole-page failures.
+    await expect(fetchOnce('CTESTCONTRACT')).rejects.toThrow(/penalty/)
+    await expect(fetchOnce('CTESTCONTRACT')).rejects.toThrow(/penalty/)
+
+    // Third attempt: quarantine mode. Make the failed_events INSERT throw.
+    const spy = vi.spyOn(pool, 'query').mockImplementation(async (text, params) => {
+      if (typeof text === 'string' && text.includes('INSERT INTO failed_events')) {
+        throw new Error('simulated failed_events insert failure')
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (pool.query as any).getMockImplementation?.() ?? pool.query(text as any, params as any)
+    })
+
+    await expect(fetchOnce('CTESTCONTRACT')).resolves.toBeUndefined()
+
+    spy.mockRestore()
+
+    // The good event folded; the bad event was rolled back and not recorded
+    // because the bookkeeping insert itself failed.
+    const members = await query<{ address: string }>('SELECT address FROM members ORDER BY address')
+    expect(members.map((m) => m.address)).toEqual(['GA'])
+    expect(await query('SELECT * FROM failed_events')).toHaveLength(0)
+
+    // Raw log has both events.
+    const rawIds = await query<{ id: string }>('SELECT id FROM events ORDER BY id')
+    expect(rawIds.map((r) => r.id).sort()).toEqual([good.id, bad.id].sort())
+
+    // Cursor advanced past the page so indexing is not stranded.
+    const row = await cursorRow()
+    expect(row?.paging_token).toBe(bad.id)
+  })
+
 
 describe('indexer: last_ledger vs observed_tip_ledger (issue #45)', () => {
   beforeEach(async () => {
