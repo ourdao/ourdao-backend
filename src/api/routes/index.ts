@@ -179,7 +179,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     }
 
     try {
-      const nonce = await nonceStore.issue(address)
+      const nonce = await nonceStore.issue(address, req.log)
       return { nonce }
     } catch (error) {
       // Nonce store capacity exceeded
@@ -532,7 +532,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // --- Mark a single notification as read ---
   app.patch<{ Params: { id: string } }>('/notifications/:id/read', async (req, reply) => {
     // First authenticate the request
-    const auth = await authenticateRequest(req.headers, nonceStore)
+    const auth = await authenticateRequest(req.headers, nonceStore, undefined, req.log)
     if (!auth.authenticated) {
       return reply.code(auth.status).send({ error: auth.error || 'Authentication required' })
     }
@@ -572,7 +572,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     }
     
     // Authenticate the request and verify the address matches
-    const auth = await authenticateRequest(req.headers, nonceStore, q.address)
+    const auth = await authenticateRequest(req.headers, nonceStore, q.address, req.log)
     if (!auth.authenticated) {
       return reply.code(auth.status).send({ error: auth.error || 'Authentication required' })
     }

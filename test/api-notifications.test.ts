@@ -88,4 +88,28 @@ describe('API: notification mutations', () => {
     const res = await app.inject({ method: 'PATCH', url: '/api/notifications/read-all' })
     expect(res.statusCode).toBe(400)
   })
+
+  // Issue #134: acting on another member's notifications must fail the same
+  // way — 403, not a mix of 401/403 — regardless of which route rejects it.
+  it('rejects acting on another address\'s notifications with 403 on both routes', async () => {
+    const other = Keypair.random().publicKey()
+
+    const [row] = await query<{ id: number }>(
+      `INSERT INTO notifications (address, type, title, message) VALUES ($1, 'info', 't', 'm') RETURNING id`,
+      [other]
+    )
+    const byId = await app.inject({
+      method: 'PATCH',
+      url: `/api/notifications/${row!.id}/read`,
+      headers: { authorization: await authHeader(app) },
+    })
+    expect(byId.statusCode).toBe(403)
+
+    const readAll = await app.inject({
+      method: 'PATCH',
+      url: `/api/notifications/read-all?address=${other}`,
+      headers: { authorization: await authHeader(app) },
+    })
+    expect(readAll.statusCode).toBe(403)
+  })
 })

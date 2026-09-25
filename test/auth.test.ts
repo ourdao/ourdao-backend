@@ -7,6 +7,7 @@ import {
   isValidStellarAddress,
   verifySignature,
   MemoryNonceStore,
+  type AuthLogger,
   type NonceStore,
 } from '../src/auth.js'
 
@@ -121,10 +122,10 @@ describe('authenticateRequest (issue #70)', () => {
     await store.shutdown()
   })
 
-  it('rejects a target-address mismatch (unchanged 401 behaviour)', async () => {
+  it('rejects a target-address mismatch with 403 — authenticated but not authorized (issue #134)', async () => {
     const other = Keypair.random().publicKey()
     const res = await authenticateRequest(headersFor(G), alwaysValidNonce, other)
-    expect(res).toMatchObject({ authenticated: false, status: 401 })
+    expect(res).toMatchObject({ authenticated: false, status: 403 })
   })
 })
 
@@ -280,7 +281,7 @@ describe('authenticateRequest — characterization (#72)', () => {
     const res = await authenticateRequest(headersFor(G, nonce), store, Keypair.random().publicKey())
     expect(res).toEqual({
       authenticated: false,
-      status: 401,
+      status: 403,
       error: 'Cannot modify notifications for another address',
     })
     await store.shutdown()
@@ -298,5 +299,66 @@ describe('authenticateRequest — characterization (#72)', () => {
     const second = await authenticateRequest(headersFor(G, nonce), store)
     expect(second).toEqual({ authenticated: true, address: G })
     await store.shutdown()
+  })
+})
+
+describe('structured logging, not console (issues #132, #133)', () => {
+  function fakeLogger(): { logger: AuthLogger; debugCalls: string[]; warnCalls: string[] } {
+    const debugCalls: string[] = []
+    const warnCalls: string[] = []
+    const logger: AuthLogger = {
+      debug: (msg) => debugCalls.push(msg),
+      warn: (msg) => warnCalls.push(msg),
+      error: () => {},
+    }
+    return { logger, debugCalls, warnCalls }
+  }
+
+  it('MemoryNonceStore.issue logs a repeat nonce through the given logger, truncated, never through console', async () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const store = new MemoryNonceStore()
+    const { logger, debugCalls } = fakeLogger()
+    await store.issue(G, logger)
+    await store.issue(G, logger) // second call hits the "existing nonce" branch
+
+    expect(debugCalls).toHaveLength(1)
+    expect(debugCalls[0]).toContain(`${G.slice(0, 4)}…${G.slice(-4)}`)
+    expect(debugCalls[0]).not.toContain(G)
+    expect(debugSpy).not.toHaveBeenCalled()
+
+    debugSpy.mockRestore()
+    await store.shutdown()
+  })
+
+  it('MemoryNonceStore.issue works with no logger passed (logging is optional)', async () => {
+    const store = new MemoryNonceStore()
+    await expect(store.issue(G)).resolves.toEqual(expect.any(String))
+    await expect(store.issue(G)).resolves.toEqual(expect.any(String))
+    await store.shutdown()
+  })
+
+  it('verifySignature logs a malformed signature through the given logger, never through console', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { logger, warnCalls } = fakeLogger()
+    verifySignature(G, 'nonce1', 'not-base64-!!!', logger)
+
+    expect(warnCalls).toHaveLength(1)
+    expect(warnCalls[0]).toContain(`${G.slice(0, 4)}…${G.slice(-4)}`)
+    expect(warnCalls[0]).not.toContain(G)
+    expect(warnSpy).not.toHaveBeenCalled()
+
+    warnSpy.mockRestore()
+  })
+
+  it('authenticateRequest threads its logger through to verifySignature', async () => {
+    const { logger, warnCalls } = fakeLogger()
+    const res = await authenticateRequest(
+      { authorization: `StellarSignature ${G}:bm90LXNpZw:n` },
+      { issue: async () => 'n', consume: async () => true },
+      undefined,
+      logger,
+    )
+    expect(res).toMatchObject({ authenticated: false, error: 'Invalid signature' })
+    expect(warnCalls).toHaveLength(1)
   })
 })
