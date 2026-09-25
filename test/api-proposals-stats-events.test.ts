@@ -88,6 +88,9 @@ describe('API: proposals, stats, events, admin/log', () => {
     expect(body.principalLent).toBe('9000')
     expect(body.principalRepaid).toBe('3000')
     expect(body.valueDefaulted).toBe('88')
+    // Issue #156: live SSE connection count is part of the stats payload.
+    expect(typeof body.connectedStreams).toBe('number')
+    expect(body.connectedStreams).toBeGreaterThanOrEqual(0)
   })
 
   it('GET /api/stats is cached: a burst of calls issues one set of queries (issue #18)', async () => {

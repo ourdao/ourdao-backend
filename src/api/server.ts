@@ -7,7 +7,6 @@ import { config } from '../config.js'
 import { pool } from '../db/index.js'
 import { registerErrorHandling } from './errors.js'
 import { registerRoutes } from './routes/index.js'
-import { registerStreamEndpoint } from './stream.js'
 import { MemoryNonceStore, PostgresNonceStore, type NonceStore } from '../auth.js'
 import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
@@ -100,11 +99,8 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     allowList: (req: { url: string }) => req.url === '/health' || req.url === '/ready' || req.url === '/version',
   })
 
-  // ── Routes ──
+  // ── Routes (including /api/stream — issue #158) ──
   await app.register(registerRoutes, { prefix: '/api', nonceStore })
-
-  // ── Stream endpoint (issue #63) ──
-  await registerStreamEndpoint(app, pool)
 
   // ── Liveness probe (issue #2) — no DB round trip ──
   app.get('/health', async () => ({ status: 'ok', contract: config.stellar.contractId || null }))
