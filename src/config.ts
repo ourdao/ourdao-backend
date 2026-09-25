@@ -81,6 +81,13 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // INDEXER_STALE_AFTER_MS. In-process only: with more than one API
     // instance they may briefly disagree.
     statsCacheMs: int(env, 'STATS_CACHE_MS', 5_000),
+    // Issue #156: concurrent SSE stream bounds. Each open stream holds a
+    // dedicated Postgres LISTEN connection, so these caps are the real
+    // resource bound (the request rate limiter only covers connection attempts).
+    streamMaxConnections: int(env, 'STREAM_MAX_CONNECTIONS', 100),
+    streamMaxConnectionsPerIp: int(env, 'STREAM_MAX_CONNECTIONS_PER_IP', 10),
+    streamIdleTimeoutMs: int(env, 'STREAM_IDLE_TIMEOUT_MS', 60_000),
+    streamRetryAfterSeconds: int(env, 'STREAM_RETRY_AFTER_SECONDS', 30),
     // Pino log level for the Fastify server (fatal, error, warn, info, debug, trace, silent).
     // 'silent' suppresses all request logging, which the test harness uses.
     logLevel: logLevel(env, 'LOG_LEVEL', 'info'),

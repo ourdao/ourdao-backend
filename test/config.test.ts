@@ -64,6 +64,11 @@ describe('resolveConfig', () => {
         rateLimitEventsMax: 30,
         trustProxy: 'false',
         statsCacheMs: 5000,
+        streamMaxConnections: 100,
+        streamMaxConnectionsPerIp: 10,
+        streamIdleTimeoutMs: 60000,
+        streamRetryAfterSeconds: 30,
+        logLevel: 'info',
       },
       db: { connectionString: undefined, nonceStore: 'postgres' },
       stellar: {

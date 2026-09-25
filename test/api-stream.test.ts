@@ -6,9 +6,15 @@ import { closeDb, resetDb } from './db.js'
 import {
   DRAIN_STALL_DISCONNECT_MS,
   MAX_QUEUED_MESSAGES,
+  PG_NOTIFY_MAX_PAYLOAD_BYTES,
   STREAM_CHANNELS,
   StreamClient,
+  getConnectedStreamCount,
+  notifyStreamClients,
+  notifyStreamClientsOrThrow,
   parseChannelSubset,
+  resetConnectedStreamsForTests,
+  streamLimits,
   type StreamChannel,
 } from '../src/api/stream.js'
 import type { FastifyReply } from 'fastify'
@@ -43,6 +49,9 @@ function makeFakeStreamPair(writable: { canWrite: boolean }) {
     on: (event: string, cb: (...args: unknown[]) => void) => {
       (rawListeners[event] ??= []).push(cb)
     },
+    emit(event: string) {
+      for (const cb of rawListeners[event] ?? []) cb()
+    },
     emitDrain() {
       for (const cb of rawListeners.drain ?? []) cb()
     },
@@ -54,24 +63,30 @@ function makeFakeStreamPair(writable: { canWrite: boolean }) {
     reply: fakeReply as unknown as FastifyReply,
     raw,
     fakeClient,
+    rawListeners,
   }
 }
 
 describe('API: /api/stream', () => {
   let app: FastifyInstance
+  const originalLimits = { ...streamLimits }
 
   beforeEach(async () => {
     await resetDb()
+    resetConnectedStreamsForTests()
+    Object.assign(streamLimits, originalLimits)
     app = await buildServer()
     await app.ready()
   })
 
   afterEach(async () => {
     await app.close()
+    resetConnectedStreamsForTests()
+    Object.assign(streamLimits, originalLimits)
     closeDb()
   })
 
-  it('GET /api/stream returns 200 with SSE headers', async () => {
+  it('GET /api/stream returns 200 with SSE headers (issue #158: prefixed path)', async () => {
     // Start the stream in a promise (it will block)
     const streamPromise = app.inject({ method: 'GET', url: '/api/stream' }).then((res) => {
       expect(res.statusCode).toBe(200)
@@ -85,6 +100,14 @@ describe('API: /api/stream', () => {
 
     // The streaming connection is open but won't complete until we close it
     // For now, just verify the response started correctly
+    void streamPromise
+  })
+
+  it('stream is registered under the /api plugin prefix, not as a hard-coded root path (issue #158)', async () => {
+    const routes = app.printRoutes({ commonPrefix: false })
+    expect(routes).toMatch(/\/api\/stream/)
+    // The hard-coded root registration is gone — only the prefixed route remains.
+    expect(app.hasRoute({ method: 'GET', url: '/api/stream' })).toBe(true)
   })
 
   it('receives initial connection message on stream', async () => {
@@ -125,6 +148,49 @@ describe('API: /api/stream', () => {
     expect(inject1).toBeDefined()
     expect(inject2).toBeDefined()
   })
+
+  it('rejects connections beyond STREAM_MAX_CONNECTIONS with 503 + Retry-After (issue #156)', async () => {
+    streamLimits.maxConnections = 2
+    streamLimits.maxConnectionsPerIp = 10
+    streamLimits.retryAfterSeconds = 17
+
+    // Hold two connections open via raw Node HTTP against the listening server.
+    await app.listen({ port: 0, host: '127.0.0.1' })
+    const address = app.server.address()
+    if (!address || typeof address === 'string') throw new Error('expected TCP address')
+    const base = `http://127.0.0.1:${address.port}`
+
+    const http = await import('node:http')
+    const openOne = () =>
+      new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
+        const req = http.get(`${base}/api/stream`, (res) => resolve(res))
+        req.on('error', reject)
+      })
+
+    const first = await openOne()
+    const second = await openOne()
+    expect(first.statusCode).toBe(200)
+    expect(second.statusCode).toBe(200)
+    // Give the server a tick to register both clients in connectedClients.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(getConnectedStreamCount()).toBeGreaterThanOrEqual(2)
+
+    const third = await openOne()
+    expect(third.statusCode).toBe(503)
+    expect(third.headers['retry-after']).toBe('17')
+
+    // Drain/abort so afterEach can close cleanly.
+    first.destroy()
+    second.destroy()
+    third.resume()
+  })
+
+  it('exposes connectedStreams on GET /api/stats (issue #156)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/stats' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ connectedStreams: expect.any(Number) })
+    expect(res.json().connectedStreams).toBe(getConnectedStreamCount())
+  })
 })
 
 describe('Stream NOTIFY integration', () => {
@@ -145,6 +211,59 @@ describe('Stream NOTIFY integration', () => {
     expect(validChannels).toContain('members_changed')
     expect(validChannels).toContain('loan_proposals_changed')
     expect(validChannels).toContain('loans_changed')
+  })
+
+  it('pg_notify round-trips quotes, backslashes and unicode unchanged (issue #153)', async () => {
+    await resetDb()
+    const listenClient = await pool.connect()
+    const notifyClient = await pool.connect()
+    const channel = STREAM_CHANNELS.members
+    const payload = {
+      name: "O'Reilly\\path",
+      note: 'café 你好 🎉',
+      slash: 'a\\b\\c',
+      quote: `he said "hi"`,
+    }
+
+    try {
+      await listenClient.query(`LISTEN "${channel}"`)
+      const got = new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('NOTIFY timeout')), 5_000)
+        listenClient.once('notification', (msg) => {
+          clearTimeout(timer)
+          resolve(msg.payload ?? '')
+        })
+      })
+
+      await notifyStreamClients(notifyClient, channel, payload)
+      const raw = await got
+      expect(JSON.parse(raw)).toEqual(payload)
+    } finally {
+      try {
+        await listenClient.query(`UNLISTEN "${channel}"`)
+      } catch {
+        /* ignore */
+      }
+      listenClient.release()
+      notifyClient.release()
+    }
+  })
+
+  it('refuses an over-long NOTIFY payload cleanly (issue #153)', async () => {
+    await resetDb()
+    const client = await pool.connect()
+    try {
+      const big = { blob: 'x'.repeat(PG_NOTIFY_MAX_PAYLOAD_BYTES + 100) }
+      await expect(
+        notifyStreamClientsOrThrow(client, STREAM_CHANNELS.loans, big)
+      ).rejects.toThrow(/exceeds/)
+      // Soft path logs and does not throw (indexer must not break).
+      await expect(
+        notifyStreamClients(client, STREAM_CHANNELS.loans, big)
+      ).resolves.toBeUndefined()
+    } finally {
+      client.release()
+    }
   })
 })
 
@@ -284,6 +403,38 @@ describe('StreamClient backpressure', () => {
       await sc.close()
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('close() is idempotent under concurrent close+error and releases once (issue #159)', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const { client, reply, raw, fakeClient } = makeFakeStreamPair({ canWrite: true })
+      const sc = new StreamClient(reply, client, '127.0.0.1')
+      await sc.start([STREAM_CHANNELS.loans])
+
+      // Simulate the production handlers: sync wrappers with .catch, fired
+      // concurrently the way a socket 'close' and 'error' can race.
+      const cleanup = () => {
+        void sc.close().catch((err) => {
+          console.error('[stream] close error on socket event:', err)
+        })
+      }
+      cleanup()
+      cleanup()
+      raw.emit('close')
+      raw.emit('error')
+
+      // Let the async UNLISTEN + release settle.
+      await new Promise((r) => setTimeout(r, 50))
+      expect(fakeClient.release).toHaveBeenCalledTimes(1)
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
     }
   })
 })

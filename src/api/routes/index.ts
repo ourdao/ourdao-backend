@@ -24,6 +24,7 @@ import type {
   TimelineEntry,
 } from '../../types.js'
 import { authenticateRequest, classifyStellarAddress, type NonceStore } from '../../auth.js'
+import { getConnectedStreamCount, registerStreamEndpoint } from '../stream.js'
 
 function parseLimit(v: unknown, def = 50, max = 200): number | null {
   if (v === undefined || v === null || v === '') return def
@@ -147,7 +148,13 @@ function withLoanDerived(loan: LoanRow): LoanRow & { interest_charge: string; re
 
 export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: NonceStore }): Promise<void> {
   const { nonceStore } = opts
-  
+
+  // --- SSE stream (issues #63, #158) ---
+  // Registered inside the `/api` plugin so it inherits the prefix and any
+  // future plugin-scoped hooks. See registerStreamEndpoint for the rate-limit
+  // decision (handshake stays rate-limited; open connections use STREAM_MAX_*).
+  await registerStreamEndpoint(app)
+
   // --- Authentication challenge (issue #65) ---
   // Stricter rate limit on this endpoint to prevent DoS attacks
   app.get<{ Querystring: { address: string } }>('/auth/challenge', {
@@ -817,17 +824,22 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       estimatedLagSeconds,
       secondsSinceUpdate,
       indexerStale: isStale,
+      // Issue #156: live SSE connection count for this process.
+      connectedStreams: getConnectedStreamCount(),
     }
   }
 
   app.get('/stats', async (_req, reply): Promise<DAOStats> => {
     const ttl = config.http.statsCacheMs
     reply.header('Cache-Control', `public, max-age=${Math.max(0, Math.floor(ttl / 1000))}`)
+    // Issue #156: connectedStreams is live process state — always refresh it
+    // even when the rest of the stats payload is served from the short cache.
+    const liveStreams = getConnectedStreamCount()
     if (statsCache && Date.now() - statsCache.at < ttl) {
-      return statsCache.value
+      return { ...statsCache.value, connectedStreams: liveStreams }
     }
     const value = await computeStats()
     statsCache = { at: Date.now(), value }
-    return value
+    return { ...value, connectedStreams: liveStreams }
   })
 }

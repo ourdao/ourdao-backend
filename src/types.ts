@@ -220,4 +220,7 @@ export interface DAOStats {
   estimatedLagSeconds: number | null
   secondsSinceUpdate: number | null
   indexerStale: boolean
+  // Open SSE stream connections on this process (issue #156). In-process
+  // only — with more than one API instance the figures are per-instance.
+  connectedStreams: number
 }
