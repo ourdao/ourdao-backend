@@ -5,7 +5,7 @@ import { join } from 'path'
 import { buildServer } from '../src/api/server.js'
 import { query } from '../src/db/index.js'
 import { closeDb, resetDb } from './db.js'
-import { parseCorsOrigin } from '../src/config.js'
+import { config, parseCorsOrigin } from '../src/config.js'
 
 describe('parseCorsOrigin', () => {
   it('returns localhost:3000 when unset', () => {
@@ -126,6 +126,17 @@ describe('API: /health and /ready', () => {
       await query('DELETE FROM indexer_cursor')
       await query('ALTER TABLE indexer_cursor ALTER COLUMN updated_at SET NOT NULL')
     }
+  })
+
+  it('GET /ready derives estimatedLagSeconds from the configured ledger close time, not a bare literal (issue #139)', async () => {
+    await query(
+      `INSERT INTO indexer_cursor (id, last_ledger, observed_tip_ledger, updated_at) VALUES (1, 100, 104, now())`
+    )
+    const res = await app.inject({ method: 'GET', url: '/ready' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.ledgersBehind).toBe(4)
+    expect(body.estimatedLagSeconds).toBe(4 * config.stellar.ledgerCloseTimeSeconds)
   })
 
   it('GET /ready returns 503 when cursor is stale', async () => {

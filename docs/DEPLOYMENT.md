@@ -156,6 +156,7 @@ All configuration is environment-driven. See [`.env.example`](../.env.example) f
 | `SOROBAN_RPC_URL` | testnet | Set to your preferred RPC endpoint. Public endpoints are rate-limited. |
 | `NETWORK_PASSPHRASE` | testnet | **Set to mainnet passphrase for mainnet deployments.** |
 | `DATABASE_URL` | _(none)_ | Postgres connection string. |
+| `DB_POOL_MAX` | `10` | Per-instance request pool size. See [Database connections](#database-connections) — `/api/stream` no longer needs headroom here (issue #152). |
 | `NONCE_STORE` | `postgres` | Keep `postgres` for multi-instance API. |
 | `START_LEDGER` | `0` | **Set to the contract's deploy ledger on first boot.** See above. |
 | `START_LOOKBACK_LEDGERS` | `17280` | Used only when `START_LEDGER=0`. |
@@ -180,8 +181,8 @@ All configuration is environment-driven. See [`.env.example`](../.env.example) f
 Both the API and the worker maintain a pool of Postgres connections. They connect to the same database but are separate OS processes with separate pools — size them together.
 
 - **Worker**: one long-running poller with modest concurrency. The pool is used for migrations on boot, then for a rolling sequence of per-page transactions. A pool size of 2–5 is typically sufficient.
-- **API**: stateless and horizontally scalable. Each instance maintains its own pool. Pool size depends on expected query concurrency; the default `pg` pool size of 10 per instance is a reasonable starting point.
-- **Total connections**: `worker_pool + (api_instances × api_pool_size)` must fit within Postgres's `max_connections`. The default is 100; budget accordingly, or use a connection pooler (PgBouncer, RDS Proxy) if you scale API instances beyond a handful.
+- **API**: stateless and horizontally scalable. Each instance maintains its own pool, sized via `DB_POOL_MAX` (default 10, `pg`'s own default made explicit). Pool size depends on expected *request* query concurrency only — `/api/stream` does **not** add to it: each instance keeps exactly one extra long-lived connection for its shared SSE listener, regardless of how many browser tabs are connected to that instance (issue #152 — a per-client connection here used to let ten concurrent streams alone exhaust the whole request pool).
+- **Total connections**: `worker_pool + (api_instances × (DB_POOL_MAX + 1))` must fit within Postgres's `max_connections` (the `+ 1` per instance is its stream listener). The default is 100; budget accordingly, or use a connection pooler (PgBouncer, RDS Proxy) if you scale API instances beyond a handful.
 
 The schema is applied idempotently by both processes on boot, serialized by a Postgres advisory lock. You do not need a separate migration step. Concurrent boots (e.g. a rolling deploy of the API alongside the worker restarting) are safe.
 

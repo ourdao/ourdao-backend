@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildServer } from '../src/api/server.js'
+import { config } from '../src/config.js'
 import { pool, query } from '../src/db/index.js'
 import { closeDb, resetDb } from './db.js'
 
@@ -81,6 +82,8 @@ describe('API: proposals, stats, events, admin/log', () => {
     // Issue #45: the folded high-water mark and the RPC-observed tip are
     // reported separately rather than conflated into one column.
     expect(body.observedTipLedger).toBe(1200)
+    // Issue #139: derived from the configured ledger close time, not a bare literal.
+    expect(body.estimatedLagSeconds).toBe((1200 - 999) * config.stellar.ledgerCloseTimeSeconds)
     // Issue #43: a dashboard-visible count of quarantined events.
     expect(body.quarantinedEvents).toBe(1)
     // Lifetime money figures (issue #24), decimal strings.

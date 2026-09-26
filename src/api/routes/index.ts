@@ -801,7 +801,11 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     const ledgersBehind = lastLedger != null && tipLedger != null && tipLedger > lastLedger
       ? tipLedger - lastLedger
       : null
-    const estimatedLagSeconds = ledgersBehind != null ? ledgersBehind * 5 : null
+    // Issue #139: same derivation as /ready — a named, configurable constant
+    // rather than a bare literal that could silently drift from it.
+    const estimatedLagSeconds = ledgersBehind != null
+      ? ledgersBehind * config.stellar.ledgerCloseTimeSeconds
+      : null
 
     return {
       totalMembers: Number(row?.total_members ?? 0),

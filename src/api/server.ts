@@ -151,7 +151,9 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     const ledgersBehind = lastLedger != null && tipLedger != null && tipLedger > lastLedger
       ? tipLedger - lastLedger
       : null
-    const estimatedLagSeconds = ledgersBehind != null ? ledgersBehind * 5 : null
+    const estimatedLagSeconds = ledgersBehind != null
+      ? ledgersBehind * config.stellar.ledgerCloseTimeSeconds
+      : null
 
     if (isStale) {
       return reply.code(503).send({

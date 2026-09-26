@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildServer } from '../src/api/server.js'
-import { pool, query } from '../src/db/index.js'
+import { pool } from '../src/db/index.js'
 import { closeDb, resetDb } from './db.js'
 import {
   DRAIN_STALL_DISCONNECT_MS,
@@ -9,37 +9,27 @@ import {
   PG_NOTIFY_MAX_PAYLOAD_BYTES,
   STREAM_CHANNELS,
   StreamClient,
+  dispatchStreamNotification,
   getConnectedStreamCount,
+  knownLedger,
   notifyStreamClients,
   notifyStreamClientsOrThrow,
   parseChannelSubset,
   resetConnectedStreamsForTests,
+  shutdownSharedListener,
   streamLimits,
-  type StreamChannel,
 } from '../src/api/stream.js'
 import type { FastifyReply } from 'fastify'
-import type { PoolClient } from 'pg'
 
-// A minimal fake of the pieces of PoolClient/FastifyReply StreamClient
-// actually uses, so #157's backpressure logic (queue growth, stall-timeout
-// disconnect, heartbeat skip) can be driven directly and deterministically
-// — a client that never reads is otherwise only reproducible with a real
-// socket, which is slow and non-deterministic to assert timing against.
+// A minimal fake of the pieces of FastifyReply StreamClient actually uses, so
+// #157's backpressure logic (queue growth, stall-timeout disconnect,
+// heartbeat skip) can be driven directly and deterministically — a client
+// that never reads is otherwise only reproducible with a real socket, which
+// is slow and non-deterministic to assert timing against. Since issue #152
+// removed StreamClient's own PoolClient (notifications are now fanned out
+// via `receiveNotification`, not a `pg` event emitter this class owns), the
+// fake only needs to cover the reply side.
 function makeFakeStreamPair(writable: { canWrite: boolean }) {
-  const clientListeners: Record<string, ((...args: unknown[]) => void)[]> = {}
-  const fakeClient = {
-    query: vi.fn().mockResolvedValue(undefined),
-    on: (event: string, cb: (...args: unknown[]) => void) => {
-      (clientListeners[event] ??= []).push(cb)
-    },
-    release: vi.fn(),
-    emitNotification(channel: StreamChannel, payload?: Record<string, unknown>) {
-      for (const cb of clientListeners.notification ?? []) {
-        cb({ channel, payload: payload ? JSON.stringify(payload) : undefined })
-      }
-    },
-  }
-
   const rawListeners: Record<string, ((...args: unknown[]) => void)[]> = {}
   const raw = {
     write: vi.fn(() => writable.canWrite),
@@ -49,9 +39,6 @@ function makeFakeStreamPair(writable: { canWrite: boolean }) {
     on: (event: string, cb: (...args: unknown[]) => void) => {
       (rawListeners[event] ??= []).push(cb)
     },
-    emit(event: string) {
-      for (const cb of rawListeners[event] ?? []) cb()
-    },
     emitDrain() {
       for (const cb of rawListeners.drain ?? []) cb()
     },
@@ -59,11 +46,8 @@ function makeFakeStreamPair(writable: { canWrite: boolean }) {
   const fakeReply = { header: vi.fn(), raw }
 
   return {
-    client: fakeClient as unknown as PoolClient,
     reply: fakeReply as unknown as FastifyReply,
     raw,
-    fakeClient,
-    rawListeners,
   }
 }
 
@@ -191,6 +175,49 @@ describe('API: /api/stream', () => {
     expect(res.json()).toMatchObject({ connectedStreams: expect.any(Number) })
     expect(res.json().connectedStreams).toBe(getConnectedStreamCount())
   })
+
+  it('opens more concurrent streams than the DB pool size without starving ordinary requests (issue #152)', async () => {
+    // node-postgres exposes `max` on `pool.options` at runtime even though
+    // @types/pg doesn't declare it — pg-pool reads it live on every connect().
+    const poolWithOptions = pool as unknown as { options: { max: number } }
+    const originalMax = poolWithOptions.options.max
+    poolWithOptions.options.max = 2
+    try {
+      await app.listen({ port: 0, host: '127.0.0.1' })
+      const address = app.server.address()
+      if (!address || typeof address === 'string') throw new Error('expected TCP address')
+      const base = `http://127.0.0.1:${address.port}`
+
+      const http = await import('node:http')
+      const openOne = () =>
+        new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
+          const req = http.get(`${base}/api/stream`, (res) => resolve(res))
+          req.on('error', reject)
+        })
+
+      // More concurrent SSE clients than the pool's max connection count.
+      // Under the old per-client-connection design this alone would exhaust
+      // the pool.
+      const streams = await Promise.all([openOne(), openOne(), openOne(), openOne(), openOne()])
+      for (const s of streams) expect(s.statusCode).toBe(200)
+      await new Promise((r) => setTimeout(r, 100))
+      expect(getConnectedStreamCount()).toBeGreaterThanOrEqual(streams.length)
+
+      // An ordinary DB-backed request must still complete promptly — this is
+      // exactly what used to hang indefinitely (issue #152).
+      const readyRes = await Promise.race([
+        app.inject({ method: 'GET', url: '/ready' }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('ordinary request timed out — pool exhausted by SSE streams')), 3000)
+        ),
+      ])
+      expect(readyRes.statusCode).toBeLessThan(500)
+
+      for (const s of streams) s.destroy()
+    } finally {
+      poolWithOptions.options.max = originalMax
+    }
+  })
 })
 
 describe('Stream NOTIFY integration', () => {
@@ -293,32 +320,35 @@ describe('parseChannelSubset', () => {
 // Issue #157: SSE writes must respect backpressure rather than buffering an
 // unbounded backlog for a client that stops reading.
 describe('StreamClient backpressure', () => {
-  it('subscribes only to the requested channel subset (issue #160)', async () => {
-    const { client, reply, fakeClient } = makeFakeStreamPair({ canWrite: true })
-    const sc = new StreamClient(reply, client)
+  it('only delivers notifications for the requested channel subset (issue #160)', async () => {
+    const { reply, raw } = makeFakeStreamPair({ canWrite: true })
+    const sc = new StreamClient(reply)
     await sc.start([STREAM_CHANNELS.loans])
 
-    const listenCalls = fakeClient.query.mock.calls.map((c) => c[0])
-    expect(listenCalls).toContain(`LISTEN "${STREAM_CHANNELS.loans}"`)
-    expect(listenCalls).not.toContain(`LISTEN "${STREAM_CHANNELS.members}"`)
+    const writesBefore = raw.write.mock.calls.length
+    sc.receiveNotification(STREAM_CHANNELS.members, {})
+    expect(raw.write.mock.calls.length).toBe(writesBefore) // not subscribed — ignored
+
+    sc.receiveNotification(STREAM_CHANNELS.loans, {})
+    expect(raw.write.mock.calls.length).toBe(writesBefore + 1)
 
     await sc.close()
   })
 
   it('pauses on a false write() return and queues further messages instead of writing immediately', async () => {
     const writable = { canWrite: true }
-    const { client, reply, raw, fakeClient } = makeFakeStreamPair(writable)
-    const sc = new StreamClient(reply, client)
+    const { reply, raw } = makeFakeStreamPair(writable)
+    const sc = new StreamClient(reply)
     await sc.start([STREAM_CHANNELS.loans])
 
     const writesBeforePause = raw.write.mock.calls.length
     writable.canWrite = false // simulate the socket's buffer going over its high-water mark
-    fakeClient.emitNotification(STREAM_CHANNELS.loans) // this write() call trips `paused`
+    sc.receiveNotification(STREAM_CHANNELS.loans, {}) // this write() call trips `paused`
     expect(raw.write.mock.calls.length).toBe(writesBeforePause + 1)
 
     // Further messages while paused must not call write() again — they queue.
-    fakeClient.emitNotification(STREAM_CHANNELS.loans)
-    fakeClient.emitNotification(STREAM_CHANNELS.loans)
+    sc.receiveNotification(STREAM_CHANNELS.loans, {})
+    sc.receiveNotification(STREAM_CHANNELS.loans, {})
     expect(raw.write.mock.calls.length).toBe(writesBeforePause + 1)
 
     await sc.close()
@@ -326,14 +356,14 @@ describe('StreamClient backpressure', () => {
 
   it('flushes the queue once drain fires', async () => {
     const writable = { canWrite: true }
-    const { client, reply, raw, fakeClient } = makeFakeStreamPair(writable)
-    const sc = new StreamClient(reply, client)
+    const { reply, raw } = makeFakeStreamPair(writable)
+    const sc = new StreamClient(reply)
     await sc.start([STREAM_CHANNELS.loans])
 
     writable.canWrite = false
-    fakeClient.emitNotification(STREAM_CHANNELS.loans) // triggers pause
-    fakeClient.emitNotification(STREAM_CHANNELS.loans) // queued
-    fakeClient.emitNotification(STREAM_CHANNELS.loans) // queued
+    sc.receiveNotification(STREAM_CHANNELS.loans, {}) // triggers pause
+    sc.receiveNotification(STREAM_CHANNELS.loans, {}) // queued
+    sc.receiveNotification(STREAM_CHANNELS.loans, {}) // queued
     const writesWhilePaused = raw.write.mock.calls.length
 
     writable.canWrite = true
@@ -346,38 +376,36 @@ describe('StreamClient backpressure', () => {
 
   it(`drops a client whose backlog exceeds MAX_QUEUED_MESSAGES (${MAX_QUEUED_MESSAGES})`, async () => {
     const writable = { canWrite: true }
-    const { client, reply, fakeClient } = makeFakeStreamPair(writable)
-    const sc = new StreamClient(reply, client)
+    const { reply, raw } = makeFakeStreamPair(writable)
+    const sc = new StreamClient(reply)
     await sc.start([STREAM_CHANNELS.loans])
 
     writable.canWrite = false
-    fakeClient.emitNotification(STREAM_CHANNELS.loans) // trips pause
+    sc.receiveNotification(STREAM_CHANNELS.loans, {}) // trips pause
     for (let i = 0; i < MAX_QUEUED_MESSAGES + 5; i++) {
-      fakeClient.emitNotification(STREAM_CHANNELS.loans)
+      sc.receiveNotification(STREAM_CHANNELS.loans, {})
     }
 
-    // close() releases the underlying Postgres client — the signal that
-    // this stalled client was dropped rather than buffered forever.
-    expect(fakeClient.release).toHaveBeenCalled()
+    // close() ends the response — the signal that this stalled client was
+    // dropped rather than buffered forever.
+    expect(raw.end).toHaveBeenCalled()
   })
 
   it(`drops a client backpressured for longer than DRAIN_STALL_DISCONNECT_MS (${DRAIN_STALL_DISCONNECT_MS}ms) even without exceeding the queue bound`, async () => {
     vi.useFakeTimers()
     try {
       const writable = { canWrite: true }
-      const { client, reply, fakeClient } = makeFakeStreamPair(writable)
-      const sc = new StreamClient(reply, client)
+      const { reply, raw } = makeFakeStreamPair(writable)
+      const sc = new StreamClient(reply)
       await sc.start([STREAM_CHANNELS.loans])
 
       writable.canWrite = false
-      fakeClient.emitNotification(STREAM_CHANNELS.loans) // trips pause, arms the stall timer
-      expect(fakeClient.release).not.toHaveBeenCalled()
+      sc.receiveNotification(STREAM_CHANNELS.loans, {}) // trips pause, arms the stall timer
+      expect(raw.end).not.toHaveBeenCalled()
 
-      // Async variant: the stall timer's callback calls the async close(),
-      // which itself awaits UNLISTEN queries before release() — plain
-      // advanceTimersByTime only runs the synchronous part of the callback.
+      // Async variant: the stall timer's callback calls the async close().
       await vi.advanceTimersByTimeAsync(DRAIN_STALL_DISCONNECT_MS + 1)
-      expect(fakeClient.release).toHaveBeenCalled()
+      expect(raw.end).toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }
@@ -387,12 +415,12 @@ describe('StreamClient backpressure', () => {
     vi.useFakeTimers()
     try {
       const writable = { canWrite: true }
-      const { client, reply, raw, fakeClient } = makeFakeStreamPair(writable)
-      const sc = new StreamClient(reply, client)
+      const { reply, raw } = makeFakeStreamPair(writable)
+      const sc = new StreamClient(reply)
       await sc.start([STREAM_CHANNELS.loans])
 
       writable.canWrite = false
-      fakeClient.emitNotification(STREAM_CHANNELS.loans) // trips pause
+      sc.receiveNotification(STREAM_CHANNELS.loans, {}) // trips pause
       const writesWhilePaused = raw.write.mock.calls.length
 
       // Advance past a heartbeat interval; a backed-up client must not get
@@ -406,15 +434,15 @@ describe('StreamClient backpressure', () => {
     }
   })
 
-  it('close() is idempotent under concurrent close+error and releases once (issue #159)', async () => {
+  it('close() is idempotent under concurrent close calls (issue #159)', async () => {
     const unhandled: unknown[] = []
     const onUnhandled = (reason: unknown) => {
       unhandled.push(reason)
     }
     process.on('unhandledRejection', onUnhandled)
     try {
-      const { client, reply, raw, fakeClient } = makeFakeStreamPair({ canWrite: true })
-      const sc = new StreamClient(reply, client, '127.0.0.1')
+      const { reply, raw } = makeFakeStreamPair({ canWrite: true })
+      const sc = new StreamClient(reply, '127.0.0.1')
       await sc.start([STREAM_CHANNELS.loans])
 
       // Simulate the production handlers: sync wrappers with .catch, fired
@@ -426,15 +454,251 @@ describe('StreamClient backpressure', () => {
       }
       cleanup()
       cleanup()
-      raw.emit('close')
-      raw.emit('error')
 
-      // Let the async UNLISTEN + release settle.
+      // Let the async cleanup settle.
       await new Promise((r) => setTimeout(r, 50))
-      expect(fakeClient.release).toHaveBeenCalledTimes(1)
+      expect(raw.end).toHaveBeenCalledTimes(1)
       expect(unhandled).toEqual([])
     } finally {
       process.off('unhandledRejection', onUnhandled)
     }
+  })
+})
+
+// Issue #154: a non-JSON NOTIFY payload must not crash the process. Issue
+// #155: the process-wide known-ledger tracker used for SSE ids / resync.
+describe('dispatchStreamNotification', () => {
+  afterEach(() => {
+    knownLedger.value = null
+  })
+
+  it('drops a malformed payload without throwing, and logs it once', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(() => dispatchStreamNotification(STREAM_CHANNELS.loans, 'not valid json')).not.toThrow()
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('malformed NOTIFY payload'))
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('treats a missing payload as {} without attempting to parse it', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(() => dispatchStreamNotification(STREAM_CHANNELS.loans, undefined)).not.toThrow()
+      expect(errorSpy).not.toHaveBeenCalled()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('advances knownLedger.value from a numeric payload.ledger, monotonically (issue #155)', () => {
+    knownLedger.value = 10
+    dispatchStreamNotification(STREAM_CHANNELS.loans, JSON.stringify({ ledger: 15 }))
+    expect(knownLedger.value).toBe(15)
+
+    // An older/out-of-order ledger must not move the frontier backwards.
+    dispatchStreamNotification(STREAM_CHANNELS.loans, JSON.stringify({ ledger: 12 }))
+    expect(knownLedger.value).toBe(15)
+  })
+
+  it('leaves knownLedger.value untouched when the payload has no numeric ledger', () => {
+    knownLedger.value = 10
+    dispatchStreamNotification(STREAM_CHANNELS.loans, JSON.stringify({ message: 'hi' }))
+    expect(knownLedger.value).toBe(10)
+  })
+})
+
+// Issue #152 / #154 / #155 end-to-end: real Postgres NOTIFY, real SSE frames.
+describe('Stream end-to-end over real Postgres', () => {
+  let app: FastifyInstance
+  let base: string | null = null
+  const originalLimits = { ...streamLimits }
+  const originalKnownLedger = knownLedger.value
+
+  beforeEach(async () => {
+    await resetDb()
+    resetConnectedStreamsForTests()
+    Object.assign(streamLimits, originalLimits)
+    base = null
+    app = await buildServer()
+    await app.ready()
+  })
+
+  afterEach(async () => {
+    await app.close()
+    resetConnectedStreamsForTests()
+    Object.assign(streamLimits, originalLimits)
+    knownLedger.value = originalKnownLedger
+    closeDb()
+  })
+
+  async function openStream(
+    path: string,
+    headers?: Record<string, string>
+  ): Promise<import('node:http').IncomingMessage> {
+    if (!base) {
+      await app.listen({ port: 0, host: '127.0.0.1' })
+      const address = app.server.address()
+      if (!address || typeof address === 'string') throw new Error('expected TCP address')
+      base = `http://127.0.0.1:${address.port}`
+    }
+    const http = await import('node:http')
+    return new Promise((resolve, reject) => {
+      const req = http.get(`${base}${path}`, { headers }, (res) => resolve(res))
+      req.on('error', reject)
+    })
+  }
+
+  interface SseFrame {
+    event: string
+    id: string
+    data: { type: string; channel?: string; payload?: Record<string, unknown> }
+  }
+
+  function collectSseFrames(
+    res: import('node:http').IncomingMessage,
+    count: number,
+    timeoutMs = 5000
+  ): Promise<SseFrame[]> {
+    return new Promise((resolve, reject) => {
+      let buffer = ''
+      const frames: SseFrame[] = []
+      const timer = setTimeout(
+        () => reject(new Error(`timed out waiting for ${count} SSE frame(s), got ${frames.length}`)),
+        timeoutMs
+      )
+      res.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf8')
+        let idx: number
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const rawFrame = buffer.slice(0, idx)
+          buffer = buffer.slice(idx + 2)
+          const parsed: Record<string, string> = {}
+          for (const line of rawFrame.split('\n')) {
+            const sep = line.indexOf(': ')
+            if (sep === -1) continue
+            parsed[line.slice(0, sep)] = line.slice(sep + 2)
+          }
+          frames.push({
+            event: parsed.event ?? '',
+            id: parsed.id ?? '',
+            data: parsed.data ? JSON.parse(parsed.data) : undefined,
+          })
+          if (frames.length >= count) {
+            clearTimeout(timer)
+            resolve(frames)
+            return
+          }
+        }
+      })
+      res.on('error', reject)
+    })
+  }
+
+  it('a malformed NOTIFY payload does not crash the stream — client stays connected and keeps receiving (issue #154)', async () => {
+    const res = await openStream('/api/stream?channels=loans')
+    expect(res.statusCode).toBe(200)
+
+    const frames = collectSseFrames(res, 2)
+    await new Promise((r) => setTimeout(r, 100)) // let the shared listener finish LISTEN
+    await pool.query('SELECT pg_notify($1, $2)', [STREAM_CHANNELS.loans, 'not valid json'])
+    await pool.query(
+      'SELECT pg_notify($1, $2)',
+      [STREAM_CHANNELS.loans, JSON.stringify({ symbol: 'loan_disburse', ledger: 1 })]
+    )
+
+    const [connected, real] = await frames
+    if (!connected || !real) throw new Error('expected 2 frames')
+    expect(connected.data.payload).toMatchObject({ message: 'Connected to stream' })
+    expect(real.event).toBe('notification')
+    expect(real.data.payload).toMatchObject({ symbol: 'loan_disburse' })
+
+    res.destroy()
+  })
+
+  it('SSE ids are the monotonic known-ledger sequence, not Date.now() timestamps (issue #155)', async () => {
+    const res = await openStream('/api/stream?channels=loans')
+    const frames = collectSseFrames(res, 2)
+    await new Promise((r) => setTimeout(r, 100))
+    await pool.query(
+      'SELECT pg_notify($1, $2)',
+      [STREAM_CHANNELS.loans, JSON.stringify({ symbol: 'loan_disburse', ledger: 777 })]
+    )
+
+    const [, real] = await frames
+    if (!real) throw new Error('expected 2 frames')
+    expect(real.id).toBe('777')
+
+    res.destroy()
+  })
+
+  it('reconnecting with a stale Last-Event-ID is told it may have missed changes (issue #155)', async () => {
+    knownLedger.value = 500
+    const res = await openStream('/api/stream', { 'Last-Event-ID': '100' })
+    expect(res.statusCode).toBe(200)
+
+    const [first] = await collectSseFrames(res, 1)
+    if (!first) throw new Error('expected 1 frame')
+    expect(first.event).toBe('resync')
+    expect(first.id).toBe('500')
+    expect(first.data.payload).toMatchObject({ missed: true, lastKnownLedger: 500 })
+
+    res.destroy()
+  })
+
+  it('reconnecting with a current Last-Event-ID is told it did not miss anything (issue #155)', async () => {
+    knownLedger.value = 500
+    const res = await openStream('/api/stream', { 'Last-Event-ID': '500' })
+    expect(res.statusCode).toBe(200)
+
+    const [first] = await collectSseFrames(res, 1)
+    if (!first) throw new Error('expected 1 frame')
+    expect(first.event).toBe('resync')
+    expect(first.data.payload).toMatchObject({ missed: false, lastKnownLedger: 500 })
+
+    res.destroy()
+  })
+
+  it('a fresh connection with no Last-Event-ID gets no resync frame, just the normal connected message (issue #155)', async () => {
+    knownLedger.value = 500
+    const res = await openStream('/api/stream')
+    expect(res.statusCode).toBe(200)
+
+    const [first] = await collectSseFrames(res, 1)
+    if (!first) throw new Error('expected 1 frame')
+    expect(first.event).toBe('notification')
+    expect(first.data.payload).toMatchObject({ message: 'Connected to stream' })
+
+    res.destroy()
+  })
+
+  it('shutdownSharedListener() closes the standalone connection cleanly, and it reconnects on the next stream (issue #152)', async () => {
+    const res = await openStream('/api/stream?channels=loans')
+    expect(res.statusCode).toBe(200)
+    await new Promise((r) => setTimeout(r, 50))
+    res.destroy()
+
+    // Must resolve promptly rather than hang — this is what `src/index.ts`'s
+    // shutdown handler awaits before `pool.end()`.
+    await expect(shutdownSharedListener()).resolves.toBeUndefined()
+    // Idempotent: calling it again with nothing to close must not throw.
+    await expect(shutdownSharedListener()).resolves.toBeUndefined()
+
+    // The next incoming stream must still work — ensureStarted() reconnects
+    // from scratch rather than staying wedged on the closed connection.
+    const res2 = await openStream('/api/stream?channels=loans')
+    expect(res2.statusCode).toBe(200)
+    const frames = collectSseFrames(res2, 2)
+    await new Promise((r) => setTimeout(r, 50))
+    await pool.query(
+      'SELECT pg_notify($1, $2)',
+      [STREAM_CHANNELS.loans, JSON.stringify({ symbol: 'loan_disburse', ledger: 42 })]
+    )
+    const [, real] = await frames
+    if (!real) throw new Error('expected 2 frames')
+    expect(real.data.payload).toMatchObject({ symbol: 'loan_disburse' })
+
+    res2.destroy()
   })
 })
