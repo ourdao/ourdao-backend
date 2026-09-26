@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
-import type { PoolClient } from 'pg'
+import type { Client, PoolClient } from 'pg'
 import { config } from '../config.js'
-import { pool } from '../db/index.js'
+import { createDedicatedClient } from '../db/index.js'
 
 /**
  * Server-Sent Events stream for real-time updates (issue #63).
@@ -15,10 +15,17 @@ import { pool } from '../db/index.js'
  *
  * Multiple API instances each LISTEN independently and fan out to their own clients,
  * which is correct without coordination.
+ *
+ * Issue #152: every SSE client used to hold its own dedicated pool connection
+ * for the life of the stream. Postgres LISTEN/NOTIFY is per-connection, not
+ * per-subscriber, so this file now keeps exactly one shared listener
+ * connection per process (see `SharedListener` below) and fans notifications
+ * out in-process to every connected `StreamClient` — ten, a hundred, or a
+ * thousand concurrent streams all cost this process the same one connection.
  */
 
 export interface StreamMessage {
-  type: 'heartbeat' | 'notification' | 'error'
+  type: 'heartbeat' | 'notification' | 'error' | 'resync'
   channel?: string
   payload?: Record<string, unknown>
   timestamp: number
@@ -63,7 +70,7 @@ export const MAX_QUEUED_MESSAGES = 200
 // for longer than this with no progress, the client is dropped even if its
 // queue hasn't hit MAX_QUEUED_MESSAGES yet — e.g. a socket that receives
 // only occasional low-volume notifications could otherwise sit paused
-// indefinitely, holding its dedicated LISTEN/NOTIFY Postgres connection
+// indefinitely, holding its socket/file descriptor and queued frames
 // forever without ever growing its queue enough to trip that bound.
 export const DRAIN_STALL_DISCONNECT_MS = 30_000
 
@@ -106,18 +113,195 @@ export function resetConnectedStreamsForTests(): void {
 }
 
 /**
- * Manage a single SSE client connection.
- * Handles LISTEN subscriptions and sends events as they arrive.
+ * Issue #155: process-wide best-known "system frontier" — the highest ledger
+ * sequence number carried by any change notification seen so far, seeded
+ * from `indexer_cursor.last_ledger` when the shared listener (issue #152)
+ * first connects. `null` means cold start / not yet known.
+ *
+ * Used to (a) seed each newly-connecting client's monotonic SSE `id:`
+ * baseline and (b) tell a reconnecting client (via `Last-Event-ID`) whether
+ * it may have missed a change while it was away. Exported as a mutable
+ * object, the same pattern as `streamLimits`, so tests can drive it directly
+ * instead of racing the real indexer.
+ */
+export const knownLedger: { value: number | null } = { value: null }
+
+/**
+ * Parse one NOTIFY payload and fan it out to every connected client
+ * subscribed to that channel. Exported (rather than kept as a private method
+ * on the listener below) so issue #154's malformed-payload guard and issue
+ * #155's ledger tracking can be unit-tested directly, without a real
+ * Postgres LISTEN connection.
+ *
+ * Issue #154: this used to run inside a `pg` event-emitter callback directly
+ * on each client's own dedicated connection — a throw there is NOT caught by
+ * any surrounding try/catch and becomes an uncaught exception that kills the
+ * whole process, taking every connected SSE client down with it.
+ * `JSON.parse` throws on anything that isn't valid JSON, and the payload
+ * arrives over NOTIFY, which anything with database access (a psql session,
+ * a trigger, an operator, a future producer) can send with any content — not
+ * just this codebase's own well-formed callers. The parse happens exactly
+ * once here (not once per subscriber), so a bad payload logs exactly once
+ * whether zero clients or a hundred are subscribed, and a malformed message
+ * is dropped rather than propagated. Other listener callbacks in this file
+ * were audited for the same shape and don't parse untrusted input, so this
+ * is the only guard needed. A blanket process-wide `uncaughtException`
+ * handler was considered as defence in depth and deliberately not added — it
+ * would mask unrelated bugs behind a generic catch-all instead of fixing the
+ * actual unguarded call site, and would leave the process in a possibly
+ * inconsistent state rather than just skipping one bad message.
+ */
+export function dispatchStreamNotification(channel: StreamChannel, rawPayload?: string): void {
+  let payload: Record<string, unknown> = {}
+  if (rawPayload) {
+    try {
+      payload = JSON.parse(rawPayload) as Record<string, unknown>
+    } catch (err) {
+      console.error(
+        `[stream] dropping malformed NOTIFY payload on channel "${channel}": ${(err as Error).message} — payload prefix: ${rawPayload.slice(0, 200)}`
+      )
+      return
+    }
+  }
+
+  // Issue #155: track the highest ledger any notification has carried, so a
+  // client connecting later starts its `id:` sequence from a meaningful
+  // baseline instead of 0, and a reconnecting client can be told whether it
+  // missed anything.
+  const ledger = payload.ledger
+  if (typeof ledger === 'number' && (knownLedger.value === null || ledger > knownLedger.value)) {
+    knownLedger.value = ledger
+  }
+
+  for (const sc of connectedClients) {
+    sc.receiveNotification(channel, payload)
+  }
+}
+
+/**
+ * Issue #152: the single shared Postgres LISTEN connection for this process.
+ * Postgres LISTEN/NOTIFY is per-connection, not per-subscriber — one
+ * connection can serve every subscriber — so every `StreamClient` fans out
+ * from this one connection instead of each holding its own. It is a
+ * standalone connection (src/db/index.ts's `createDedicatedClient`), not one
+ * checked out of the shared request pool — see `connect()` below for why.
+ * Before this fix, each SSE client held its own dedicated pool connection;
+ * node-postgres's pool defaults to 10, so ten concurrent SSE clients used to
+ * consume all of them, hanging every other request indefinitely, including
+ * `/ready` (which cannot even report why, because answering also needs a
+ * connection).
+ */
+class SharedListener {
+  private client: Client | null = null
+  private connecting: Promise<void> | null = null
+
+  /** Idempotent: connects on first call, a no-op once connected. */
+  async ensureStarted(): Promise<void> {
+    if (this.client) return
+    if (!this.connecting) {
+      this.connecting = this.connect().finally(() => {
+        this.connecting = null
+      })
+    }
+    return this.connecting
+  }
+
+  private async connect(): Promise<void> {
+    // Issue #152 (code review): a *standalone* connection (src/db/index.ts's
+    // createDedicatedClient), not one checked out of the shared `pool`. This
+    // connection is held for the life of the process, so taking it from the
+    // pool would permanently consume one of `DB_POOL_MAX`'s slots — exactly
+    // the resource contention this fix exists to remove — and would make
+    // `pool.end()` on shutdown (src/index.ts) hang forever, since pg-pool
+    // only resolves `end()` once every checked-out client is released.
+    const client = createDedicatedClient()
+    try {
+      await client.connect()
+
+      try {
+        const cursor = await client.query<{ last_ledger: number | null }>(
+          'SELECT last_ledger FROM indexer_cursor WHERE id = 1'
+        )
+        const seeded = cursor.rows[0]?.last_ledger
+        // Guard against moving the frontier backwards (matches
+        // dispatchStreamNotification's own guard) — a reconnect can race a
+        // NOTIFY that already advanced `knownLedger.value` past this SELECT.
+        if (typeof seeded === 'number' && (knownLedger.value === null || seeded > knownLedger.value)) {
+          knownLedger.value = seeded
+        }
+      } catch (err) {
+        // Table may not exist yet on a brand-new database — cold start, the
+        // same condition /ready treats as `indexer: 'cold_start'`.
+        console.error('[stream] shared listener: could not seed known ledger, treating as cold start:', err)
+      }
+
+      for (const channel of Object.values(STREAM_CHANNELS)) {
+        await client.query(`LISTEN "${channel}"`)
+      }
+    } catch (err) {
+      // Setup failed partway through (connect, or one of the LISTENs) —
+      // close this connection rather than leak it, so the retry on the next
+      // incoming SSE connection starts clean instead of piling up dead
+      // sockets. `this.client` was never assigned, so ensureStarted() will
+      // retry connect() from scratch.
+      try {
+        await client.end()
+      } catch {
+        // Already closed.
+      }
+      throw err
+    }
+
+    client.on('notification', (msg) => {
+      dispatchStreamNotification(msg.channel as StreamChannel, msg.payload)
+    })
+
+    client.on('error', (err) => {
+      console.error('[stream] shared listener connection error, will reconnect on next request:', err)
+      this.client = null
+      client.end().catch(() => {
+        // Already gone.
+      })
+    })
+
+    this.client = client
+  }
+
+  /** Close the standalone connection on process shutdown (src/index.ts). */
+  async shutdown(): Promise<void> {
+    const client = this.client
+    this.client = null
+    if (!client) return
+    try {
+      await client.end()
+    } catch {
+      // Already closed.
+    }
+  }
+}
+
+const sharedListener = new SharedListener()
+
+/**
+ * Close the shared listener's standalone connection. Call this during
+ * graceful shutdown (src/index.ts), before `pool.end()` — the listener's
+ * connection is deliberately outside `pool`, so `pool.end()` never waits on
+ * it, but it still needs to be closed itself for a clean shutdown.
+ */
+export async function shutdownSharedListener(): Promise<void> {
+  await sharedListener.shutdown()
+}
+
+/**
+ * Manage a single SSE client connection: SSE framing, backpressure, and the
+ * heartbeat/idle timeout. Notification delivery comes from the shared
+ * listener's fan-out (issue #152), not from a connection this class owns.
  */
 export class StreamClient {
   private reply: FastifyReply
-  private client: PoolClient
   private channels: Set<StreamChannel> = new Set()
   private heartbeatTimer: NodeJS.Timeout | null = null
   private closed = false
-  // Issue #159: guard release() so concurrent close()/error paths cannot
-  // double-release the pool client (node-postgres treats that as an error).
-  private released = false
   private releasePromise: Promise<void> | null = null
   // Issue #157: `false` from reply.raw.write() means the stream's internal
   // buffer is above its high-water mark — the caller (us) is supposed to
@@ -126,22 +310,35 @@ export class StreamClient {
   private paused = false
   private queue: string[] = []
   private stallTimer: NodeJS.Timeout | null = null
+  // Issue #155: the highest ledger sequence this client has been shown,
+  // seeded from the process-wide `knownLedger` at connect time. Used as the
+  // SSE `id:` for every frame — monotonic and meaningful (a real ledger
+  // sequence, not `Date.now()`), rather than distinct per message.
+  private lastSentLedger = 0
   readonly ip: string
 
-  constructor(reply: FastifyReply, client: PoolClient, ip = 'unknown') {
+  constructor(reply: FastifyReply, ip = 'unknown') {
     this.reply = reply
-    this.client = client
     this.ip = ip
   }
 
   /**
-   * Set up the SSE response headers and begin listening for notifications.
+   * Set up the SSE response headers and begin accepting fanned-out
+   * notifications.
    *
    * `channels` lets a client subscribe to a subset (issue #160's query
    * parameter) — defaults to every broadcast channel, matching the
    * previous unconditional-subscribe behavior for a client that doesn't ask.
+   *
+   * `lastEventId` is the `Last-Event-ID` header a reconnecting browser
+   * resends automatically (issue #155). When present and the process knows
+   * a current ledger, the client is told up front whether it may have
+   * missed a change while disconnected, via a `resync` event.
    */
-  async start(channels: readonly StreamChannel[] = Object.values(STREAM_CHANNELS)): Promise<void> {
+  async start(
+    channels: readonly StreamChannel[] = Object.values(STREAM_CHANNELS),
+    lastEventId?: string
+  ): Promise<void> {
     this.reply.header('Content-Type', 'text/event-stream')
     this.reply.header('Cache-Control', 'no-cache')
     this.reply.header('Connection', 'keep-alive')
@@ -150,7 +347,7 @@ export class StreamClient {
     // Issue #157 / #156: idle timeout — closed automatically by Node if the
     // socket sits idle (no reads or writes) this long. Heartbeats every 30s
     // keep a healthy connection alive; a client that never receives anything
-    // (dead link, slept laptop) is dropped so it cannot hold a pool client.
+    // (dead link, slept laptop) is dropped.
     const idleMs = streamLimits.idleTimeoutMs
     this.reply.raw.setTimeout(idleMs, () => {
       void this.close().catch((err) => {
@@ -167,11 +364,26 @@ export class StreamClient {
     })
 
     // Subscribe to the requested channels (all of them, if unspecified).
-    // Channel names come from the frozen STREAM_CHANNELS constant (issue #153
-    // out-of-scope for LISTEN; still a frozen identifier, not user input).
+    // The shared listener (issue #152) already LISTENs on every channel;
+    // this only decides what this client is fanned out.
     for (const channel of channels) {
-      await this.client.query(`LISTEN "${channel}"`)
       this.channels.add(channel)
+    }
+
+    // Issue #155: seed this client's id baseline, and tell a reconnecting
+    // client whether it missed anything. Skipped when the process doesn't
+    // yet know a current ledger (cold start) — there's nothing meaningful to
+    // compare against.
+    const currentLedger = knownLedger.value
+    this.lastSentLedger = currentLedger ?? 0
+    if (lastEventId !== undefined && currentLedger !== null) {
+      const seenLedger = Number.parseInt(lastEventId, 10)
+      const missed = !Number.isFinite(seenLedger) || seenLedger < currentLedger
+      this.sendMessage({
+        type: 'resync',
+        payload: { missed, lastKnownLedger: currentLedger },
+        timestamp: Date.now(),
+      })
     }
 
     // Send an initial message
@@ -196,32 +408,21 @@ export class StreamClient {
     if (this.heartbeatTimer.unref) {
       this.heartbeatTimer.unref()
     }
+  }
 
-    // Attach listeners to the client
-    this.client.on('notification', (msg) => {
-      if (!this.closed) {
-        this.sendMessage({
-          type: 'notification',
-          channel: msg.channel,
-          payload: msg.payload ? JSON.parse(msg.payload) : {},
-          timestamp: Date.now(),
-        })
-      }
-    })
+  /**
+   * Deliver one already-parsed notification fanned out by the shared
+   * listener (issue #152), if this client is subscribed to its channel.
+   */
+  receiveNotification(channel: StreamChannel, payload: Record<string, unknown>): void {
+    if (this.closed) return
+    if (!this.channels.has(channel)) return
 
-    // Handle client errors
-    this.client.on('error', (err) => {
-      if (!this.closed) {
-        console.error('[stream] client error:', err)
-        this.sendMessage({
-          type: 'error',
-          payload: { error: 'Stream error' },
-          timestamp: Date.now(),
-        })
-        void this.close().catch((closeErr) => {
-          console.error('[stream] close error after client error:', closeErr)
-        })
-      }
+    this.sendMessage({
+      type: 'notification',
+      channel,
+      payload,
+      timestamp: Date.now(),
     })
   }
 
@@ -231,8 +432,17 @@ export class StreamClient {
   private sendMessage(msg: StreamMessage): void {
     if (this.closed) return
 
+    // Issue #155: advance this client's id baseline whenever a message
+    // carries a newer ledger sequence; otherwise repeat the last one
+    // (heartbeats and the initial "Connected" message don't carry a ledger
+    // of their own, so they report the most recent one this client knows).
+    const ledger = msg.payload?.ledger
+    if (typeof ledger === 'number' && ledger > this.lastSentLedger) {
+      this.lastSentLedger = ledger
+    }
+
     const eventType = msg.type
-    const id = `${msg.timestamp}`
+    const id = `${this.lastSentLedger}`
     const data = JSON.stringify({
       type: msg.type,
       channel: msg.channel,
@@ -309,7 +519,6 @@ export class StreamClient {
    */
   async close(): Promise<void> {
     if (this.releasePromise) return this.releasePromise
-    if (this.closed && this.released) return
     this.closed = true
     this.queue = []
     this.clearStallTimer()
@@ -325,25 +534,7 @@ export class StreamClient {
       this.heartbeatTimer = null
     }
 
-    // Unlisten from all channels
-    for (const channel of this.channels) {
-      try {
-        await this.client.query(`UNLISTEN "${channel}"`)
-      } catch {
-        // Ignore errors during cleanup
-      }
-    }
     this.channels.clear()
-
-    // Release the pool client exactly once (issue #159).
-    if (!this.released) {
-      this.released = true
-      try {
-        this.client.release()
-      } catch {
-        // Ignore errors during cleanup
-      }
-    }
 
     // Drop from the process-wide trackers (issue #156).
     if (connectedClients.delete(this)) {
@@ -372,8 +563,9 @@ export class StreamClient {
  * model long-lived sockets, so caps are the real resource bound. The route
  * is deliberately NOT added to the allowList.
  *
- * Uses the shared `pool` from `src/db/index.js` like every other route
- * (issue #158) rather than taking an injected Pool.
+ * Registered as a plain function taking the `app` instance (issue #158)
+ * rather than taking an injected Pool — it talks to Postgres only through
+ * the module-level `sharedListener` singleton (issue #152).
  */
 export function parseChannelSubset(v: unknown): StreamChannel[] | null {
   if (v === undefined || v === null || v === '') return null
@@ -402,7 +594,9 @@ export async function registerStreamEndpoint(app: FastifyInstance): Promise<void
 
     const ip = request.ip ?? request.socket?.remoteAddress ?? 'unknown'
 
-    // Issue #156: reject before acquiring a pool client when over cap.
+    // Issue #156: reject before setting anything up when over cap. This still
+    // bounds concurrent open sockets/memory even though issue #152 means
+    // they no longer each cost a database connection.
     if (connectedClients.size >= streamLimits.maxConnections) {
       reply.header('Retry-After', String(streamLimits.retryAfterSeconds))
       return reply.code(503).send({
@@ -421,12 +615,19 @@ export async function registerStreamEndpoint(app: FastifyInstance): Promise<void
       })
     }
 
+    // Issue #155: a reconnecting EventSource resends the last id it saw via
+    // this header automatically.
+    const lastEventIdHeader = request.headers['last-event-id']
+    const lastEventId = Array.isArray(lastEventIdHeader) ? lastEventIdHeader[0] : lastEventIdHeader
+
     let streamClient: StreamClient | null = null
 
     try {
-      // Dedicated connection for LISTEN/NOTIFY; StreamClient owns its release.
-      const client = await pool.connect()
-      streamClient = new StreamClient(reply, client, ip)
+      // Issue #152: ensure the one shared LISTEN connection exists; this is
+      // a no-op after the first call for the life of the process.
+      await sharedListener.ensureStarted()
+
+      streamClient = new StreamClient(reply, ip)
       connectedClients.add(streamClient)
       connectionsByIp.set(ip, ipCount + 1)
 
@@ -444,7 +645,7 @@ export async function registerStreamEndpoint(app: FastifyInstance): Promise<void
       reply.raw.on('error', onSocketDone)
 
       // Start the stream
-      await streamClient.start(channels ?? undefined)
+      await streamClient.start(channels ?? undefined, lastEventId)
     } catch (err) {
       if (streamClient) {
         await streamClient.close().catch((closeErr) => {

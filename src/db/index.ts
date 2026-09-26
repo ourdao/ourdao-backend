@@ -1,4 +1,4 @@
-import { Pool, types as pgTypes, type PoolClient, type QueryResultRow } from 'pg'
+import { Client, Pool, types as pgTypes, type PoolClient, type QueryResultRow } from 'pg'
 import { config } from '../config.js'
 
 // pg returns Postgres BIGINT (OID 20) as a JS string by default — the safe
@@ -37,12 +37,36 @@ const connectionString =
 export const pool = new Pool({
   ...(connectionString ? { connectionString } : {}),
   types: { getTypeParser: scopedGetTypeParser },
+  // Issue #152: explicit and documented rather than relying on
+  // node-postgres's implicit default (also 10, coincidentally). This pool no
+  // longer needs to size for concurrent SSE clients — /api/stream shares one
+  // long-lived listener connection for the whole process (src/api/stream.ts)
+  // instead of checking one out per client — so DB_POOL_MAX only has to cover
+  // ordinary request concurrency (queries, transactions, the nonce store).
+  max: config.db.poolMax,
 })
 
 pool.on('error', (err) => {
   // Background idle-client errors shouldn't crash the process.
   console.error('[db] unexpected idle client error:', err.message)
 })
+
+/**
+ * A standalone connection, entirely outside the pool and its `max` (issue
+ * #152's code review): used for the `/api/stream` shared LISTEN connection,
+ * which is checked out once and held for the life of the process. Taking it
+ * from `pool.connect()` instead would silently consume one of `DB_POOL_MAX`'s
+ * slots — the opposite of this pool being "sized for ordinary request
+ * concurrency only" — and would make `pool.end()` hang forever on shutdown,
+ * since pg-pool's `end()` only resolves once every checked-out client has
+ * been released, which a permanently-held listener connection never is.
+ */
+export function createDedicatedClient(): Client {
+  return new Client({
+    ...(connectionString ? { connectionString } : {}),
+    types: { getTypeParser: scopedGetTypeParser },
+  })
+}
 
 export async function query<T extends QueryResultRow = QueryResultRow>(
   text: string,

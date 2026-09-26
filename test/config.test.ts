@@ -70,11 +70,12 @@ describe('resolveConfig', () => {
         streamRetryAfterSeconds: 30,
         logLevel: 'info',
       },
-      db: { connectionString: undefined, nonceStore: 'postgres' },
+      db: { connectionString: undefined, nonceStore: 'postgres', poolMax: 10 },
       stellar: {
         contractId: '',
         rpcUrl: 'https://soroban-testnet.stellar.org',
         networkPassphrase: 'Test SDF Network ; September 2015',
+        ledgerCloseTimeSeconds: 5,
       },
       indexer: {
         startLedger: 0,
@@ -100,6 +101,8 @@ describe('resolveConfig', () => {
       CONTRACT_ID: 'C123',
       POLL_INTERVAL_MS: 'bad',
       INDEXER_RESET_ON_CONTRACT_CHANGE: '1',
+      STELLAR_LEDGER_CLOSE_TIME_SECONDS: '6',
+      DB_POOL_MAX: '25',
     })
     expect(resolved.http.port).toBe(4100)
     expect(resolved.http.host).toBe('127.0.0.1')
@@ -108,6 +111,8 @@ describe('resolveConfig', () => {
     expect(resolved.stellar.contractId).toBe('C123')
     expect(resolved.indexer.pollIntervalMs).toBe(5000)
     expect(resolved.indexer.resetOnContractChange).toBe(true)
+    expect(resolved.stellar.ledgerCloseTimeSeconds).toBe(6)
+    expect(resolved.db.poolMax).toBe(25)
   })
 
   it('falls back to postgres and warns when NONCE_STORE is unrecognized (issue #118)', () => {
