@@ -23,7 +23,7 @@ import type {
   FailedEventRow,
   TimelineEntry,
 } from '../../types.js'
-import { authenticateRequest, classifyStellarAddress, type NonceStore } from '../../auth.js'
+import { authenticateRequest, classifyStellarAddress, NonceStoreCapacityError, type NonceStore } from '../../auth.js'
 import { getConnectedStreamCount, registerStreamEndpoint } from '../stream.js'
 
 function parseLimit(v: unknown, def = 50, max = 200): number | null {
@@ -182,8 +182,10 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       const nonce = await nonceStore.issue(address, req.log)
       return { nonce }
     } catch (error) {
-      // Nonce store capacity exceeded
-      return reply.code(503).send({ error: 'Service temporarily unavailable' })
+      if (error instanceof NonceStoreCapacityError) {
+        return reply.code(503).send({ error: 'Service temporarily unavailable' })
+      }
+      throw error
     }
   })
   
