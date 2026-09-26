@@ -11,6 +11,14 @@ export interface AuthLogger {
   error(msg: string): void
 }
 
+// Typed error for nonce store capacity exceeded (issue #135)
+export class NonceStoreCapacityError extends Error {
+  constructor(message: string = 'Nonce store capacity exceeded') {
+    super(message)
+    this.name = 'NonceStoreCapacityError'
+  }
+}
+
 // Nonce storage interface - in production this would use Redis or similar
 export interface NonceStore {
   issue(address: string, logger?: AuthLogger): Promise<string>
@@ -86,7 +94,7 @@ export class MemoryNonceStore implements NonceStore {
     
     // If we're at capacity, reject new challenges to prevent DoS
     if (this.store.size >= this.MAX_ENTRIES) {
-      throw new Error('Nonce store capacity exceeded')
+      throw new NonceStoreCapacityError()
     }
     
     // Generate a random 32-byte nonce (64 hex chars)

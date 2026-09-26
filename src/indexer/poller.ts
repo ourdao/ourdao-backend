@@ -42,18 +42,20 @@ export class ReorgDetectedError extends Error {
  *  INDEXER_RESET_ON_CONTRACT_CHANGE is set. */
 export async function resetForContractChange(): Promise<void> {
   const client = await pool.connect()
-  let lockAcquired = false
   try {
-    const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1)',
+    // Use pg_advisory_xact_lock instead of pg_try_advisory_lock (issue #137):
+    // pg_advisory_xact_lock is transaction-scoped and released on COMMIT,
+    // whereas pg_try_advisory_lock is session-scoped and can be left held
+    // if the process is killed between COMMIT and the explicit unlock.
+    const lockRes = await client.query<{ pg_advisory_xact_lock: boolean }>(
+      'SELECT pg_advisory_xact_lock($1)',
       [REINDEX_LOCK_KEY]
     )
-    if (!lockRes.rows[0]?.pg_try_advisory_lock) {
+    if (!lockRes.rows[0]?.pg_advisory_xact_lock) {
       throw new Error(
         'Cannot reset database for contract change: reindex or fold operation is currently in progress (advisory lock held)'
       )
     }
-    lockAcquired = true
 
     await client.query('BEGIN')
     await client.query(`TRUNCATE ${DERIVED_TABLES.join(', ')} RESTART IDENTITY`)
@@ -61,22 +63,13 @@ export async function resetForContractChange(): Promise<void> {
     await client.query('DELETE FROM indexer_cursor WHERE id = 1')
     await client.query('COMMIT')
   } catch (err) {
-    if (lockAcquired) {
-      try {
-        await client.query('ROLLBACK')
-      } catch {
-        // Rollback failure ignored
-      }
+    try {
+      await client.query('ROLLBACK')
+    } catch {
+      // Rollback failure ignored
     }
     throw err
   } finally {
-    if (lockAcquired) {
-      try {
-        await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
-      } catch (err) {
-        console.error('[indexer] failed to release advisory lock:', err)
-      }
-    }
     client.release()
   }
 }
@@ -487,6 +480,8 @@ export async function fetchOnce(contractId: string): Promise<void> {
 
     // Advance cursor after every page (issue #3: per-page cursor advancement).
     const last = events[events.length - 1]
+    // Compute the token once (issue #138) and use for both persistence and
+    // the next request, so they never diverge if the process crashes mid-flight.
     const nextToken = last?.id ?? res.cursor ?? currentRequest.cursor ?? null
     // Highest ledger actually folded (issue #45): only advances when this
     // page had events. An empty page must never fall through to the RPC tip
@@ -529,8 +524,8 @@ export async function fetchOnce(contractId: string): Promise<void> {
       break
     }
 
-    // Build next request from the response cursor
-    currentRequest = { ...base, cursor: res.cursor }
+    // Build next request using the same token computed above (issue #138)
+    currentRequest = { ...base, cursor: nextToken }
   }
 
   // On a genuinely idle contract with nothing new to report (no events, and

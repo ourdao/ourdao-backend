@@ -124,7 +124,20 @@ async function notify(
 // Contract-published voting weight, once ourdao-contracts adds it to the vote
 // events (see the linked issue there). Until then the field decodes as
 // null/undefined and every vote counts as weight 1, same as before.
-const weightOf = (f: Record<string, unknown>): string => (f.weight == null ? '1' : str(f.weight))
+// When present, weight must be validated as an amount (issue #136) to
+// ensure a malformed value quarantines the event rather than silently
+// defaulting to zero.
+const weightOf = (ev: DecodedEvent): string => {
+  const weight = ev.fields.weight
+  if (weight == null) return '1'
+  // Validate weight as an amount when present to catch malformed values
+  const v = weight
+  const s = typeof v === 'number' && Number.isFinite(v) ? String(v) : v
+  if (typeof s !== 'string' || !/^\d+$/.test(s)) {
+    throw new FieldValidationError(ev, 'weight', `must be a non-negative decimal-integer amount, got ${JSON.stringify(v)}`)
+  }
+  return s
+}
 
 type Handler = (client: PoolClient, ev: DecodedEvent) => Promise<void>
 
@@ -217,13 +230,12 @@ const handlers: Record<string, Handler> = {
   async loan_vote(client, ev) {
     const proposalId = requireId(ev, 'proposal_id')
     const support = requireBool(ev, 'support')
-    const f = ev.fields
     const column = support ? 'votes_for' : 'votes_against'
     await client.query(
       `UPDATE loan_proposals
          SET ${column} = ${column} + $2, voter_count = voter_count + 1, updated_at = now()
        WHERE id = $1`,
-      [proposalId, weightOf(f)]
+      [proposalId, weightOf(ev)]
     )
   },
 
@@ -480,13 +492,12 @@ const handlers: Record<string, Handler> = {
   async tre_vote(client, ev) {
     const id = requireId(ev, 'id')
     const support = requireBool(ev, 'support')
-    const f = ev.fields
     const column = support ? 'votes_for' : 'votes_against'
     await client.query(
       `UPDATE treasury_proposals
          SET ${column} = ${column} + $2, voter_count = voter_count + 1, updated_at = now()
        WHERE id = $1`,
-      [id, weightOf(f)]
+      [id, weightOf(ev)]
     )
   },
 
@@ -625,13 +636,12 @@ const handlers: Record<string, Handler> = {
     // A revealed commit-reveal ballot counts like a treasury vote.
     const proposalId = requireId(ev, 'proposal_id')
     const support = requireBool(ev, 'support')
-    const f = ev.fields
     const column = support ? 'votes_for' : 'votes_against'
     await client.query(
       `UPDATE treasury_proposals
          SET ${column} = ${column} + $2, voter_count = voter_count + 1, updated_at = now()
        WHERE id = $1`,
-      [proposalId, weightOf(f)]
+      [proposalId, weightOf(ev)]
     )
   },
 }
