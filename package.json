@@ -16,6 +16,7 @@
     "start:worker": "node dist/worker.js",
     "migrate": "tsx src/db/migrate.ts",
     "reindex": "tsx src/indexer/reindex.ts",
+    "replay-failed": "tsx src/indexer/replay.ts",
     "bench:events": "tsx scripts/bench-events-storage.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint .",

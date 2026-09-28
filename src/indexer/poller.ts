@@ -179,8 +179,9 @@ async function insertRawEvent(client: PoolClient, ev: DecodedEvent): Promise<boo
 
 /** Mark an event's row as folded — set in the same transaction as the fold
  *  itself so `folded_at` is never non-null for a fold that didn't commit
- *  (issue #119). */
-async function markFolded(client: PoolClient, id: string): Promise<void> {
+ *  (issue #119). Exported for src/indexer/replay.ts (issue #170), which
+ *  folds a single previously-quarantined event the same way. */
+export async function markFolded(client: PoolClient, id: string): Promise<void> {
   await client.query('UPDATE events SET folded_at = now() WHERE id = $1', [id])
 }
 
