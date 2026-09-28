@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg'
 import { isKnownSymbol, warnUnknownSymbol, type DecodedEvent } from '../stellar/events.js'
-import { notifyStreamClients, STREAM_CHANNELS, type StreamChannel } from '../api/stream.js'
+import { STREAM_CHANNELS, type StreamChannel } from '../api/stream.js'
 import type { NotificationType } from '../types.js'
 
 // Helpers ------------------------------------------------------------------
@@ -646,9 +646,48 @@ const handlers: Record<string, Handler> = {
   },
 }
 
+// Map event symbols to the stream channel a fold of that symbol touches
+// (issue #63). Read by `applyEvent` below to decide which channel to report
+// as changed — it no longer sends the NOTIFY itself (issue #169).
+const channelMap: Record<string, StreamChannel> = {
+  joined: STREAM_CHANNELS.members,
+  exited: STREAM_CHANNELS.members,
+  staked: STREAM_CHANNELS.members,
+  unstaked: STREAM_CHANNELS.members,
+  claimed: STREAM_CHANNELS.members,
+
+  loan_req: STREAM_CHANNELS.loan_proposals,
+  loan_edit: STREAM_CHANNELS.loan_proposals,
+  loan_vote: STREAM_CHANNELS.loan_proposals,
+  loan_wait: STREAM_CHANNELS.loan_proposals,
+  loan_rej: STREAM_CHANNELS.loan_proposals,
+  loan_appr: STREAM_CHANNELS.loan_proposals,
+  loan_exp: STREAM_CHANNELS.loan_proposals,
+  loan_reject: STREAM_CHANNELS.loan_proposals,
+  loan_disburse: STREAM_CHANNELS.loans,
+  loan_repay: STREAM_CHANNELS.loans,
+  loan_default: STREAM_CHANNELS.loans,
+
+  treasury_req: STREAM_CHANNELS.treasury_proposals,
+  treasury_vote: STREAM_CHANNELS.treasury_proposals,
+  treasury_appr: STREAM_CHANNELS.treasury_proposals,
+  treasury_reject: STREAM_CHANNELS.treasury_proposals,
+  tre_wait: STREAM_CHANNELS.treasury_proposals,
+  tre_rej: STREAM_CHANNELS.treasury_proposals,
+
+  interest: STREAM_CHANNELS.interest,
+}
+
 /** Apply one decoded event's side effects. Unknown symbols are a no-op
- *  (the raw event is still persisted by the caller). */
-export async function applyEvent(client: PoolClient, ev: DecodedEvent): Promise<void> {
+ *  (the raw event is still persisted by the caller). Returns the stream
+ *  channel this event's fold touches, if any — the caller sends the actual
+ *  NOTIFY once its own transaction has committed (issue #169), rather than
+ *  this function sending it on `client`, the fold transaction's own
+ *  connection. A NOTIFY that fails or errors mid-transaction on that same
+ *  connection can otherwise poison it for Postgres's later statements in
+ *  that same transaction, which the "log but don't throw" comment this
+ *  replaced didn't account for. */
+export async function applyEvent(client: PoolClient, ev: DecodedEvent): Promise<StreamChannel | undefined> {
   // A symbol the catalog doesn't know is a deliberate no-op (raw event already
   // stored by the caller) — but announce it once so a new contract event
   // can't quietly leave derived state incomplete (issue #39).
@@ -657,43 +696,5 @@ export async function applyEvent(client: PoolClient, ev: DecodedEvent): Promise<
   const handler = handlers[ev.symbol]
   if (handler) await handler(client, ev)
 
-  // Emit NOTIFY for stream subscribers (issue #63)
-  // Map event symbols to stream channels
-  const channelMap: Record<string, StreamChannel> = {
-    joined: STREAM_CHANNELS.members,
-    exited: STREAM_CHANNELS.members,
-    staked: STREAM_CHANNELS.members,
-    unstaked: STREAM_CHANNELS.members,
-    claimed: STREAM_CHANNELS.members,
-    
-    loan_req: STREAM_CHANNELS.loan_proposals,
-    loan_edit: STREAM_CHANNELS.loan_proposals,
-    loan_vote: STREAM_CHANNELS.loan_proposals,
-    loan_wait: STREAM_CHANNELS.loan_proposals,
-    loan_rej: STREAM_CHANNELS.loan_proposals,
-    loan_appr: STREAM_CHANNELS.loan_proposals,
-    loan_exp: STREAM_CHANNELS.loan_proposals,
-    loan_reject: STREAM_CHANNELS.loan_proposals,
-    loan_disburse: STREAM_CHANNELS.loans,
-    loan_repay: STREAM_CHANNELS.loans,
-    loan_default: STREAM_CHANNELS.loans,
-
-    treasury_req: STREAM_CHANNELS.treasury_proposals,
-    treasury_vote: STREAM_CHANNELS.treasury_proposals,
-    treasury_appr: STREAM_CHANNELS.treasury_proposals,
-    treasury_reject: STREAM_CHANNELS.treasury_proposals,
-    tre_wait: STREAM_CHANNELS.treasury_proposals,
-    tre_rej: STREAM_CHANNELS.treasury_proposals,
-
-    interest: STREAM_CHANNELS.interest,
-  }
-
-  const channel = channelMap[ev.symbol]
-  if (channel) {
-    await notifyStreamClients(client, channel, {
-      symbol: ev.symbol,
-      ledger: ev.ledger,
-      timestamp: Date.now(),
-    })
-  }
+  return channelMap[ev.symbol]
 }

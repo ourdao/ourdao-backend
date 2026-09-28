@@ -7,6 +7,7 @@ import { decodeEvent, type DecodedEvent } from '../stellar/events.js'
 import { applyEvent } from './handlers.js'
 import { DERIVED_TABLES, resetDaoTotals } from './derived-tables.js'
 import { REINDEX_LOCK_KEY } from './reindex.js'
+import { notifyStreamClientsAfterCommit, type StreamChannel } from '../api/stream.js'
 
 interface CursorRow {
   paging_token: string | null
@@ -194,6 +195,12 @@ async function ingestPage(events: rpc.Api.EventResponse[], lastLedger: number): 
   if (events.length === 0) return
   const client = await pool.connect()
   let lockAcquired = false
+  // Issue #169: channels to NOTIFY once this page's transaction has
+  // committed — collected during the fold instead of notifying inline on
+  // `client`, so a NOTIFY failure can never affect (or be masked by) the
+  // fold transaction itself. Sent after `finally` below releases the lock,
+  // once we know COMMIT actually succeeded.
+  const pendingNotifications: { channel: StreamChannel; ev: DecodedEvent }[] = []
   try {
     const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
       'SELECT pg_try_advisory_lock($1)',
@@ -226,7 +233,8 @@ async function ingestPage(events: rpc.Api.EventResponse[], lastLedger: number): 
       // transaction here, so needsFold accurately reflects "not yet folded"
       // (issue #119).
       if (needsFold) {
-        await applyEvent(client, ev)
+        const channel = await applyEvent(client, ev)
+        if (channel) pendingNotifications.push({ channel, ev })
         await markFolded(client, ev.id)
       }
     }
@@ -249,6 +257,18 @@ async function ingestPage(events: rpc.Api.EventResponse[], lastLedger: number): 
       }
     }
     client.release()
+  }
+
+  // The transaction committed — send the deferred NOTIFYs now, each on its
+  // own connection from the shared pool (issue #169). A failure here is
+  // logged and counted by notifyStreamClientsAfterCommit itself; it cannot
+  // roll back or otherwise affect the fold, which is already durable.
+  for (const { channel, ev } of pendingNotifications) {
+    await notifyStreamClientsAfterCommit(channel, {
+      symbol: ev.symbol,
+      ledger: ev.ledger,
+      timestamp: Date.now(),
+    })
   }
 }
 
@@ -311,6 +331,10 @@ async function ingestEventQuarantined(ev: DecodedEvent, lastLedger: number): Pro
 
   const client = await pool.connect()
   let lockAcquired = false
+  // Issue #169: set only once this event's own transaction has committed —
+  // notified after `finally` releases the lock, on a separate connection,
+  // never on `client` itself.
+  let committedChannel: StreamChannel | undefined
   try {
     const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
       'SELECT pg_try_advisory_lock($1)',
@@ -328,9 +352,10 @@ async function ingestEventQuarantined(ev: DecodedEvent, lastLedger: number): Pro
 
     try {
       await client.query('BEGIN')
-      await applyEvent(client, ev)
+      const channel = await applyEvent(client, ev)
       await markFolded(client, ev.id)
       await client.query('COMMIT')
+      committedChannel = channel
     } catch (err) {
       await client.query('ROLLBACK')
       await recordQuarantinedEventSafely(ev, err)
@@ -344,6 +369,14 @@ async function ingestEventQuarantined(ev: DecodedEvent, lastLedger: number): Pro
       }
     }
     client.release()
+  }
+
+  if (committedChannel) {
+    await notifyStreamClientsAfterCommit(committedChannel, {
+      symbol: ev.symbol,
+      ledger: ev.ledger,
+      timestamp: Date.now(),
+    })
   }
 }
 

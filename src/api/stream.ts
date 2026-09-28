@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import type { Client, PoolClient } from 'pg'
 import { config } from '../config.js'
-import { createDedicatedClient } from '../db/index.js'
+import { createDedicatedClient, pool } from '../db/index.js'
+import { logger } from '../logger.js'
 
 /**
  * Server-Sent Events stream for real-time updates (issue #63).
@@ -658,6 +659,23 @@ export async function registerStreamEndpoint(app: FastifyInstance): Promise<void
   })
 }
 
+// Issue #169: count of NOTIFY failures (oversized payload refused, or the
+// pg_notify query itself failing) since process start — the failure used to
+// go to `console.error` only, with nothing counted and nothing in
+// `/api/stats`, so an operator had no way to notice stream clients were
+// silently missing updates.
+let notificationFailureCount = 0
+
+/** Count of NOTIFY failures since process start (issue #169). Surfaced on `/api/stats`. */
+export function getNotificationFailureCount(): number {
+  return notificationFailureCount
+}
+
+/** Test helper: reset the counter between test cases. */
+export function resetNotificationFailureCountForTests(): void {
+  notificationFailureCount = 0
+}
+
 /**
  * Emit a NOTIFY to all listening clients (called from the indexer after a transaction commits).
  * This is non-blocking and safe to call from within a transaction — the NOTIFY will be
@@ -665,6 +683,17 @@ export async function registerStreamEndpoint(app: FastifyInstance): Promise<void
  *
  * Issue #153: uses `pg_notify($1, $2)` with bound parameters — no string
  * concatenation / hand-rolled escaping. Payloads over 8000 bytes are refused.
+ *
+ * Issue #169: prefer `notifyStreamClientsAfterCommit` below for the indexer
+ * fold path. This variant still takes the caller's own `client` and is kept
+ * for callers that genuinely need the NOTIFY queued inside their own
+ * transaction (Postgres only delivers a NOTIFY sent mid-transaction once
+ * that transaction commits) — but a failure here can leave `client`'s
+ * transaction unusable for whatever statement runs after it, for some
+ * Postgres error classes. Callers that don't need that exact guarantee
+ * should use `notifyStreamClientsAfterCommit` instead, which can't affect
+ * the fold at all because it runs after the fold's transaction already
+ * committed.
  */
 export async function notifyStreamClients(
   client: PoolClient,
@@ -675,15 +704,53 @@ export async function notifyStreamClients(
     const payloadJson = payload ? JSON.stringify(payload) : ''
     const byteLength = Buffer.byteLength(payloadJson, 'utf8')
     if (byteLength > PG_NOTIFY_MAX_PAYLOAD_BYTES) {
-      console.error(
-        `[stream] NOTIFY payload exceeds ${PG_NOTIFY_MAX_PAYLOAD_BYTES} bytes (${byteLength}); refusing`
-      )
+      notificationFailureCount += 1
+      logger.error('NOTIFY payload exceeds size limit; refusing', {
+        channel,
+        byteLength,
+        limitBytes: PG_NOTIFY_MAX_PAYLOAD_BYTES,
+      })
       return
     }
     await client.query('SELECT pg_notify($1, $2)', [channel, payloadJson])
   } catch (err) {
     // Log but don't throw — notification failure shouldn't break the indexer
-    console.error('[stream] NOTIFY error:', err)
+    notificationFailureCount += 1
+    logger.error('NOTIFY failed', { channel, error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+/**
+ * Emit a NOTIFY on a connection entirely separate from the fold transaction
+ * that produced it (issue #169) — a fresh connection checked out of the
+ * shared request pool, used once, and released. Call this only after the
+ * fold's own transaction has already committed: by then the derived-table
+ * writes are durable, so a NOTIFY failure here is purely a delivery problem
+ * for connected stream clients, and categorically cannot roll back or
+ * poison the fold. This is what `src/indexer/poller.ts` and
+ * `src/indexer/reindex.ts` call once their transaction commits, instead of
+ * `applyEvent` notifying inline on the transaction's own client.
+ */
+export async function notifyStreamClientsAfterCommit(
+  channel: StreamChannel,
+  payload?: Record<string, unknown>
+): Promise<void> {
+  try {
+    const payloadJson = payload ? JSON.stringify(payload) : ''
+    const byteLength = Buffer.byteLength(payloadJson, 'utf8')
+    if (byteLength > PG_NOTIFY_MAX_PAYLOAD_BYTES) {
+      notificationFailureCount += 1
+      logger.error('NOTIFY payload exceeds size limit; refusing', {
+        channel,
+        byteLength,
+        limitBytes: PG_NOTIFY_MAX_PAYLOAD_BYTES,
+      })
+      return
+    }
+    await pool.query('SELECT pg_notify($1, $2)', [channel, payloadJson])
+  } catch (err) {
+    notificationFailureCount += 1
+    logger.error('NOTIFY failed', { channel, error: err instanceof Error ? err.message : String(err) })
   }
 }
 
