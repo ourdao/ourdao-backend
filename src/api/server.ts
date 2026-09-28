@@ -114,11 +114,31 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
 
   // ── Readiness probe (issue #2) — checks DB + indexer freshness ──
   app.get('/ready', async (_req, reply) => {
-    // 1. Postgres reachable?
+    // 1. Postgres reachable, and within a bounded time (issue #167). The
+    // `catch` below only ever sees the query itself fail (refused, auth
+    // error) — it never fired for a *hung* database, since `pool.query`
+    // has no timeout of its own and just waits for a free connection
+    // forever. Racing it against an explicit timeout here means a hung
+    // database still answers `503` promptly instead of leaving the
+    // orchestrator to time out the HTTP request itself, which reports a
+    // generic probe timeout rather than `postgres_unreachable` and never
+    // gets a response body out at all.
+    let timedOut = false
     try {
-      await pool.query('SELECT 1')
+      await Promise.race([
+        pool.query('SELECT 1'),
+        new Promise((_resolve, reject) => {
+          setTimeout(() => {
+            timedOut = true
+            reject(new Error('ready check timed out'))
+          }, config.http.readyCheckTimeoutMs)
+        }),
+      ])
     } catch {
-      return reply.code(503).send({ status: 'not ready', reason: 'postgres_unreachable' })
+      return reply.code(503).send({
+        status: 'not ready',
+        reason: timedOut ? 'postgres_timeout' : 'postgres_unreachable',
+      })
     }
 
     // 2. Indexer cursor state

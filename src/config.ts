@@ -93,6 +93,13 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // Pino log level for the Fastify server (fatal, error, warn, info, debug, trace, silent).
     // 'silent' suppresses all request logging, which the test harness uses.
     logLevel: logLevel(env, 'LOG_LEVEL', 'info'),
+    // Issue #167: /ready races its Postgres check against this timeout so a
+    // hung database (mid-failover, an exhausted pool) reports `503` within a
+    // bounded time instead of leaving the orchestrator to time out the HTTP
+    // request itself — which loses the real reason ("postgres_unreachable")
+    // and never sends a response body. Kept below typical liveness/readiness
+    // probe timeouts (a few seconds) so it always resolves first.
+    readyCheckTimeoutMs: int(env, 'READY_CHECK_TIMEOUT_MS', 3_000),
   },
   db: {
     // pg reads PG* env vars automatically; connectionString wins when set.
@@ -105,6 +112,18 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // client (see src/api/stream.ts's shared listener), so this pool is
     // sized for ordinary request concurrency only.
     poolMax: int(env, 'DB_POOL_MAX', 10),
+    // Issue #167: how long a client may wait for a free connection from the
+    // pool before pg gives up with a connection-timeout error, rather than
+    // waiting forever when the pool is exhausted or Postgres is unreachable.
+    connectionTimeoutMs: int(env, 'DB_CONNECTION_TIMEOUT_MS', 5_000),
+    // Issue #167: server-side `statement_timeout` applied to every
+    // connection this pool opens (via pg's `Pool` `statement_timeout`
+    // option), so a query against a database that accepted the connection
+    // but then hangs (mid-failover, a stuck lock) is killed by Postgres
+    // itself instead of blocking the caller indefinitely. 10s comfortably
+    // covers this codebase's heaviest query (reindex uses its own
+    // long-lived connection, not this pool, and is unaffected).
+    statementTimeoutMs: int(env, 'DB_STATEMENT_TIMEOUT_MS', 10_000),
   },
   stellar: {
     contractId: str(env, 'CONTRACT_ID'),

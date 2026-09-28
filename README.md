@@ -101,6 +101,9 @@ All configuration is environment-driven — see [`.env.example`](./.env.example)
 | `STELLAR_LEDGER_CLOSE_TIME_SECONDS` | Nominal Stellar ledger close time in seconds, used by `/ready` to turn `ledgersBehind` into `estimatedLagSeconds` (default 5; not an SLA). |
 | `DATABASE_URL` | Postgres connection string (or set the individual `PG*` vars). |
 | `DB_POOL_MAX` | Max size of the shared request pool (default 10, node-postgres's own default made explicit — issue #152). `/api/stream` no longer takes a connection per client (see the `/api/stream` row below), so this only has to cover ordinary request concurrency. |
+| `DB_CONNECTION_TIMEOUT_MS` | How long (ms) a caller waits for a free pool connection before pg gives up (default 5000). Without this the pool waits forever when exhausted or when Postgres is unreachable at the TCP level (issue #167). |
+| `DB_STATEMENT_TIMEOUT_MS` | Postgres `statement_timeout` (ms) applied to every connection this pool opens (default 10000). Kills a query that hangs after the connection succeeded — a stuck lock, a database mid-failover — instead of leaving it to run indefinitely (issue #167). |
+| `READY_CHECK_TIMEOUT_MS` | How long (ms) `/ready`'s Postgres check is allowed to run before it's treated as a timeout rather than waiting on `DB_CONNECTION_TIMEOUT_MS`/`DB_STATEMENT_TIMEOUT_MS` to fire on their own (default 3000). Distinguishes a hung database (`postgres_timeout`) from a refused connection (`postgres_unreachable`) in the response body (issue #167). |
 | `START_LEDGER` / `START_LOOKBACK_LEDGERS` | Where to start indexing on a cold start. Public Soroban RPC only retains ~24h of events, so an old start ledger gets clamped to the oldest the RPC still serves. |
 | `POLL_INTERVAL_MS` / `EVENTS_PAGE_LIMIT` | Indexer poll cadence and page size. |
 | `POLL_MAX_BACKOFF_MS` | Cap for exponential backoff after consecutive poll failures (default 60s). |

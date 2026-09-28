@@ -44,6 +44,18 @@ export const pool = new Pool({
   // instead of checking one out per client — so DB_POOL_MAX only has to cover
   // ordinary request concurrency (queries, transactions, the nonce store).
   max: config.db.poolMax,
+  // Issue #167: without this, a caller waiting on `pool.connect()`/
+  // `pool.query()` when every connection is checked out (or Postgres is
+  // unreachable at the TCP level) waits forever — there was no bound at all.
+  // `/ready` also races its own check against READY_CHECK_TIMEOUT_MS as a
+  // second, tighter guard, but every other route sharing this pool benefits
+  // from this floor too.
+  connectionTimeoutMillis: config.db.connectionTimeoutMs,
+  // Issue #167: server-side per-statement timeout applied on every
+  // connection this pool opens, so a query that hangs after a connection was
+  // successfully established (a stuck lock, a database mid-failover) is
+  // killed by Postgres rather than left running indefinitely.
+  statement_timeout: config.db.statementTimeoutMs,
 })
 
 pool.on('error', (err) => {
