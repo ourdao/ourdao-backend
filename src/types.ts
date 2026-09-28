@@ -185,6 +185,9 @@ export interface FailedEventRow {
   ledger: number
   error: string
   created_at: string
+  // Issue #168: set once a reindex or targeted replay (#170) re-folded this
+  // event successfully. NULL means still outstanding.
+  resolved_at: string | null
 }
 
 export interface DAOStats {
@@ -223,4 +226,7 @@ export interface DAOStats {
   // Open SSE stream connections on this process (issue #156). In-process
   // only — with more than one API instance the figures are per-instance.
   connectedStreams: number
+  // Count of failed stream NOTIFYs since process start (issue #169).
+  // In-process only, same caveat as connectedStreams above.
+  notificationFailures: number
 }

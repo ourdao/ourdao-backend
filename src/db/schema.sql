@@ -208,19 +208,27 @@ CREATE INDEX IF NOT EXISTS interest_distributions_ledger_idx ON interest_distrib
 -- mutated or deleted — this is a separate, additive record of what the
 -- poller gave up on folding and why, so the rest of the page can proceed and
 -- the cursor can advance past it. Not a derived table: never truncated by
--- npm run reindex, since a reindex re-attempts every raw event fresh and
--- either folds it (if the handler's since been fixed) or doesn't touch this
--- table at all (reindex runs applyEvent directly, not the poller's
--- quarantine path).
+-- npm run reindex.
+--
+-- `resolved_at` (issue #168) is set — the row is never deleted, so the
+-- failure history survives — once the event this row refers to has folded
+-- successfully: either a full `npm run reindex` re-applied the whole log
+-- without error (which necessarily re-applied this event too), or a
+-- targeted `npm run replay-failed` (issue #170) re-folded this one record.
+-- NULL means still outstanding; `/api/stats.quarantinedEvents` counts only
+-- those, so the figure means "still a live problem" rather than "ever
+-- happened".
 CREATE TABLE IF NOT EXISTS failed_events (
-  id         BIGSERIAL PRIMARY KEY,
-  event_id   TEXT NOT NULL,
-  symbol     TEXT NOT NULL,
-  ledger     BIGINT NOT NULL,
-  error      TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  id          BIGSERIAL PRIMARY KEY,
+  event_id    TEXT NOT NULL,
+  symbol      TEXT NOT NULL,
+  ledger      BIGINT NOT NULL,
+  error       TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS failed_events_event_id_idx ON failed_events (event_id);
+CREATE INDEX IF NOT EXISTS failed_events_unresolved_idx ON failed_events (id) WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS failed_events_ledger_idx ON failed_events (ledger);
 
 -- One row per `doc_attn` event (issue #44): the existence and history of a

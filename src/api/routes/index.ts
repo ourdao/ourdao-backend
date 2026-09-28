@@ -24,7 +24,7 @@ import type {
   TimelineEntry,
 } from '../../types.js'
 import { authenticateRequest, classifyStellarAddress, NonceStoreCapacityError, type NonceStore } from '../../auth.js'
-import { getConnectedStreamCount, registerStreamEndpoint } from '../stream.js'
+import { getConnectedStreamCount, getNotificationFailureCount, registerStreamEndpoint } from '../stream.js'
 
 function parseLimit(v: unknown, def = 50, max = 200): number | null {
   if (v === undefined || v === null || v === '') return def
@@ -719,15 +719,24 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
 
+    // Issue #168: `?unresolved=true` narrows to records a reindex or replay
+    // hasn't repaired yet — the live-problem view; omitting it returns the
+    // full history, resolved records included.
+    const onlyUnresolved = q.unresolved === 'true'
+
     const params: unknown[] = []
-    let where = ''
+    const conditions: string[] = []
     if (before !== null) {
       params.push(before)
-      where = `WHERE id < $${params.length}`
+      conditions.push(`id < $${params.length}`)
     }
+    if (onlyUnresolved) {
+      conditions.push(`resolved_at IS NULL`)
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     params.push(l)
     const rows = await query<Omit<FailedEventRow, 'error'>>(
-      `SELECT id, event_id, symbol, ledger, created_at
+      `SELECT id, event_id, symbol, ledger, created_at, resolved_at
          FROM failed_events ${where}
         ORDER BY id DESC LIMIT $${params.length}`,
       params
@@ -786,7 +795,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
          (SELECT principal_lent     FROM dao_totals WHERE id = 1)                  AS principal_lent,
          (SELECT principal_repaid   FROM dao_totals WHERE id = 1)                  AS principal_repaid,
          (SELECT value_defaulted    FROM dao_totals WHERE id = 1)                  AS value_defaulted,
-         (SELECT count(*) FROM failed_events)                                     AS quarantined_events,
+         (SELECT count(*) FROM failed_events WHERE resolved_at IS NULL)            AS quarantined_events,
          (SELECT last_ledger FROM indexer_cursor WHERE id = 1)                     AS last_ledger,
          (SELECT observed_tip_ledger FROM indexer_cursor WHERE id = 1)             AS observed_tip_ledger,
          (SELECT updated_at FROM indexer_cursor WHERE id = 1)                      AS cursor_updated_at`
@@ -832,6 +841,9 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       indexerStale: isStale,
       // Issue #156: live SSE connection count for this process.
       connectedStreams: getConnectedStreamCount(),
+      // Issue #169: NOTIFY failures since process start — in-process only,
+      // same caveat as connectedStreams above.
+      notificationFailures: getNotificationFailureCount(),
     }
   }
 
