@@ -3,6 +3,7 @@ import { pool } from '../db/index.js'
 import { applyEvent } from './handlers.js'
 import { namedFields, type DecodedEvent } from '../stellar/events.js'
 import { DERIVED_TABLES, resetDaoTotals } from './derived-tables.js'
+import { notifyStreamClientsAfterCommit, type StreamChannel } from '../api/stream.js'
 
 // Arbitrary fixed key for a session-level advisory lock, distinct from
 // MIGRATION_LOCK_KEY (0x0d40_0000). The indexer worker and reindex command
@@ -50,6 +51,13 @@ export interface ReindexOptions {
 export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ events: number }> {
   const client: PoolClient = await pool.connect()
   let lockAcquired = false
+  let processed = 0
+  // Issue #169: channels touched by this rebuild, notified once after
+  // COMMIT rather than per-event on `client` — a historical replay of
+  // potentially the whole event log has no business sending one NOTIFY per
+  // event, and doing so on the transaction's own connection risks the same
+  // "failure poisons the transaction" problem the live fold path had.
+  const touchedChannels = new Set<StreamChannel>()
 
   try {
     const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
@@ -75,7 +83,6 @@ export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ e
 
     const batchSize = Math.max(1, options?.batchSize ?? 1000)
     const progressIntervalMs = options?.progressIntervalMs ?? 2000
-    let processed = 0
     let lastLedger: number | null = null
     let lastId: string | null = null
     const startTime = Date.now()
@@ -117,7 +124,8 @@ export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ e
           data,
           fields: namedFields(row.symbol, data),
         }
-        await applyEvent(client, ev)
+        const channel = await applyEvent(client, ev)
+        if (channel) touchedChannels.add(channel)
         processed += 1
         lastLedger = row.ledger
         lastId = row.id
@@ -147,8 +155,16 @@ export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ e
       }
     }
 
+    // Issue #168: a reindex re-applies every raw event through the same
+    // `applyEvent` a previously-quarantined event failed in. If we got this
+    // far, every event in the log — including any that's already recorded
+    // in `failed_events` — just folded without throwing, in this same
+    // transaction. So any record still unresolved is, as of this commit,
+    // repaired: mark it rather than delete it, so the failure history (what
+    // failed and why) survives, but stop counting it as a live problem.
+    await client.query(`UPDATE failed_events SET resolved_at = now() WHERE resolved_at IS NULL`)
+
     await client.query('COMMIT')
-    return { events: processed }
   } catch (err) {
     if (lockAcquired) {
       try {
@@ -168,6 +184,15 @@ export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ e
     }
     client.release()
   }
+
+  // The rebuild committed — send the deferred NOTIFYs now that every
+  // derived-table write is durable, each on its own connection from the
+  // shared pool (issue #169), never on the reindex transaction's own client.
+  for (const channel of touchedChannels) {
+    await notifyStreamClientsAfterCommit(channel, { symbol: 'reindex', timestamp: Date.now() })
+  }
+
+  return { events: processed }
 }
 
 // `npm run reindex`
