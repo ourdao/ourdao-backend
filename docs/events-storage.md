@@ -37,8 +37,10 @@ Per `events` row (`src/db/schema.sql`):
 | `events_symbol_idx` (`symbol`) | `?symbol=` filter on `/api/events` | ~25 |
 | `events_ledger_idx` (`ledger`) | `ORDER BY ledger DESC`, reindex scan order | ~25 |
 | `events_contract_id_idx` (`contract_id`) | `?contract=` filter (rare) | ~40 |
+| `events_entity_id_idx` (`data->>0`) | loan/treasury timeline lookups | ~35 |
+| `events_data_gin_idx` (`data`) | member activity JSONB containment | workload-dependent, ~70–120 |
 
-**≈ 560–600 bytes/row all-in.** `topics`/`data` are small enough to stay
+**≈ 660–720 bytes/row all-in.** `topics`/`data` are small enough to stay
 inline (below the ~2 KB TOAST threshold), so there is no TOAST traffic in
 normal operation.
 
@@ -50,8 +52,8 @@ normal operation.
 | one member join + first stake | 2 | ~1.2 KB |
 | one treasury proposal, executed | ~5 | ~3 KB |
 | **1,000 loans of lifetime activity** | ~10k | **~6 MB** |
-| **100k events** | — | **~55–60 MB** |
-| **1M events** | — | **~550–600 MB** |
+| **100k events** | — | **~65–72 MB** |
+| **1M events** | — | **~650–720 MB** |
 
 A testnet DAO reaches maybe tens of thousands of events. A busy mainnet DAO
 running for years lands in the low millions. **This is not a scale problem
@@ -59,9 +61,10 @@ yet, and won't be soon.**
 
 ## Rebuild cost
 
-`reindexFromEventLog()` reads every row (`ORDER BY ledger ASC, id ASC` — served
-by `events_ledger_idx`) into memory and folds it in one transaction. Cost is
-`O(total history)` and never decreases. Modelled fold throughput is a few tens
+`reindexFromEventLog()` keyset-pages every row (`ORDER BY ledger ASC, id ASC` —
+served by `events_ledger_idx`) in bounded batches and folds it in one
+transaction. Its Node memory stays bounded, but its transaction duration and
+database work remain `O(total history)`. Modelled fold throughput is a few tens
 of thousands of events/second (pure Postgres round-trips in `applyEvent`, no
 network):
 
@@ -72,9 +75,9 @@ network):
 | 1M | ~40–90 s |
 | 5M | ~4–8 min |
 
-The rebuild also buffers the whole result set — that memory behaviour is a
-**separate issue** in this repo. Fixing it (streaming cursor) reduces the
-pressure here but doesn't change the `O(history)` time.
+Because the transaction spans the full rebuild, it can delay cleanup of dead
+tuples even though the reader itself is streamed. Schedule a large reindex as
+maintenance and monitor its age alongside autovacuum activity.
 
 ## Index review
 

@@ -25,6 +25,7 @@ import type {
 } from '../../types.js'
 import { authenticateRequest, classifyStellarAddress, NonceStoreCapacityError, type NonceStore } from '../../auth.js'
 import { getConnectedStreamCount, getNotificationFailureCount, registerStreamEndpoint } from '../stream.js'
+import { ConcurrencyGate } from '../load-shedding.js'
 
 function parseLimit(v: unknown, def = 50, max = 200): number | null {
   if (v === undefined || v === null || v === '') return def
@@ -753,6 +754,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // instance — a fresh registerRoutes() closure per buildServer() — so it
   // never leaks across tests or restarts.
   let statsCache: { at: number; value: DAOStats } | null = null
+  const statsGate = new ConcurrencyGate(Math.max(1, config.http.statsMaxConcurrent))
 
   async function computeStats(): Promise<DAOStats> {
     const row = await queryOne<{
@@ -847,7 +849,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     }
   }
 
-  app.get('/stats', async (_req, reply): Promise<DAOStats> => {
+  app.get('/stats', async (_req, reply): Promise<DAOStats | { error: string }> => {
     const ttl = config.http.statsCacheMs
     reply.header('Cache-Control', `public, max-age=${Math.max(0, Math.floor(ttl / 1000))}`)
     // Issue #156: connectedStreams is live process state — always refresh it
@@ -856,8 +858,31 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     if (statsCache && Date.now() - statsCache.at < ttl) {
       return { ...statsCache.value, connectedStreams: liveStreams }
     }
-    const value = await computeStats()
-    statsCache = { at: Date.now(), value }
-    return { ...value, connectedStreams: liveStreams }
+
+    // Stats is an aggregate over several tables and is the only request type
+    // allowed to be shed. A cache miss never waits behind another expensive
+    // recomputation: preserving ordinary reads is more useful than making a
+    // dashboard poll queue until the request pool is exhausted.
+    if (!statsGate.tryAcquire()) {
+      reply.header('Retry-After', String(config.http.statsRetryAfterSeconds))
+      return reply.code(503).send({ error: 'stats temporarily unavailable; retry shortly' })
+    }
+
+    try {
+      const value = await computeStats()
+      statsCache = { at: Date.now(), value }
+      return { ...value, connectedStreams: liveStreams }
+    } catch (err) {
+      // A successful prior value remains useful during a transient database
+      // failure. Surface that it is stale while retaining the normal shape.
+      if (statsCache) {
+        app.log.warn({ err }, 'stats recompute failed; serving stale cached value')
+        reply.header('X-Data-Stale', 'true')
+        return { ...statsCache.value, connectedStreams: liveStreams }
+      }
+      throw err
+    } finally {
+      statsGate.release()
+    }
   })
 }

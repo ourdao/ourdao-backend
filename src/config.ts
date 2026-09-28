@@ -81,6 +81,11 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // INDEXER_STALE_AFTER_MS. In-process only: with more than one API
     // instance they may briefly disagree.
     statsCacheMs: int(env, 'STATS_CACHE_MS', 5_000),
+    // Aggregate stats are intentionally lower priority than ordinary reads.
+    // Do not queue concurrent recomputations: a full slot sheds immediately
+    // so members, proposals, and loan reads keep a connection available.
+    statsMaxConcurrent: int(env, 'STATS_MAX_CONCURRENT', 1),
+    statsRetryAfterSeconds: int(env, 'STATS_RETRY_AFTER_SECONDS', 1),
     // Issue #156: concurrent SSE stream bounds. Open streams no longer each
     // cost a database connection (issue #152 — they share one process-wide
     // LISTEN connection), but still cost a socket/file descriptor and a

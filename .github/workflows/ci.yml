@@ -6,9 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         node-version: [20, 22, 24]
@@ -83,6 +88,7 @@ jobs:
   # attributable at a glance and doesn't block the source gates.
   docker-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -196,24 +202,30 @@ jobs:
           docker run -d --name api --network host \
             --health-interval=3s --health-start-period=3s --health-retries=10 \
             -e DATABASE_URL="$DB_URL" -e PORT=4000 -e CONTRACT_ID=CTEST "$IMAGE"
+          status=starting
           for _ in $(seq 1 40); do
             s="$(docker inspect -f '{{.State.Health.Status}}' api)"
-            [ "$s" = healthy ] && break
-            [ "$s" = unhealthy ] && break
+            [ "$s" = healthy ] && { status=healthy; break; }
+            [ "$s" = unhealthy ] && { status=unhealthy; break; }
             sleep 2
           done
           echo "--- api logs ---"; docker logs api
           curl -fsS -o /dev/null -w 'GET /health -> %{http_code}\n' http://localhost:4000/health
           docker rm -f api >/dev/null
-          test "$s" = healthy
+          test "$status" = healthy
 
       - name: worker entrypoint boots and exits 0 on SIGTERM
         run: |
           docker run -d --name worker --network host \
             -e DATABASE_URL="$DB_URL" -e CONTRACT_ID=CTEST \
             "$IMAGE" node dist/worker.js
-          sleep 10
+          # Bound startup observation independently of the job timeout.
+          for _ in $(seq 1 10); do
+            docker inspect -f '{{.State.Running}}' worker | grep -qx true || break
+            sleep 1
+          done
           echo "--- worker logs ---"; docker logs worker
+          docker inspect -f '{{.State.Running}}' worker | grep -qx true
           docker stop -t 15 worker
           code="$(docker inspect -f '{{.State.ExitCode}}' worker)"
           echo "worker exit code: $code"

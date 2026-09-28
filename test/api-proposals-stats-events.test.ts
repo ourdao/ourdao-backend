@@ -116,6 +116,67 @@ describe('API: proposals, stats, events, admin/log', () => {
     }
   })
 
+  it('serves the last stats value when an expired-cache recompute fails', async () => {
+    const initial = await app.inject({ method: 'GET', url: '/api/stats' })
+    expect(initial.statusCode).toBe(200)
+
+    const realNow = Date.now
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(realNow() + config.http.statsCacheMs + 1)
+    const queryFailure = vi.spyOn(pool, 'query').mockRejectedValueOnce(new Error('database unavailable'))
+    try {
+      const stale = await app.inject({ method: 'GET', url: '/api/stats' })
+      expect(stale.statusCode).toBe(200)
+      expect(stale.headers['x-data-stale']).toBe('true')
+      expect(stale.json()).toEqual(initial.json())
+    } finally {
+      clock.mockRestore()
+      queryFailure.mockRestore()
+    }
+  })
+
+  it('sheds a blocked stats recompute while an ordinary read still succeeds', async () => {
+    // This is deliberately a real Postgres test. An ACCESS EXCLUSIVE lock
+    // makes the aggregate wait on `members`; while it occupies the one stats
+    // slot, another stats request must receive 503, yet `/loans` (a cheap
+    // query on a different table) still obtains a pool connection and works.
+    const locker = await pool.connect()
+    let firstStats: Promise<Awaited<ReturnType<typeof app.inject>>> | undefined
+    try {
+      await locker.query('BEGIN')
+      await locker.query('LOCK TABLE members IN ACCESS EXCLUSIVE MODE')
+      firstStats = app.inject({ method: 'GET', url: '/api/stats' })
+
+      const deadline = Date.now() + 2_000
+      let statsQueryIsBlocked = false
+      while (Date.now() < deadline) {
+        const waiting = await pool.query<{ wait_event_type: string | null }>(
+          `SELECT wait_event_type
+             FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND query LIKE '%AS total_members%'
+              AND wait_event_type = 'Lock'`
+        )
+        if (waiting.rows.length > 0) {
+          statsQueryIsBlocked = true
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(statsQueryIsBlocked).toBe(true)
+
+      const shed = await app.inject({ method: 'GET', url: '/api/stats' })
+      expect(shed.statusCode).toBe(503)
+      expect(shed.headers['retry-after']).toBe(String(config.http.statsRetryAfterSeconds))
+
+      const cheapRead = await app.inject({ method: 'GET', url: '/api/loans' })
+      expect(cheapRead.statusCode).toBe(200)
+    } finally {
+      await locker.query('ROLLBACK')
+      locker.release()
+      await firstStats
+    }
+  })
+
   it('GET /api/events filters by symbol and paginates with before=<ledger>', async () => {
     await query(
       `INSERT INTO events (id, ledger, closed_at, contract_id, symbol, topics, data) VALUES
