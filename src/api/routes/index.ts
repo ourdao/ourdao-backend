@@ -625,36 +625,57 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     )
   })
 
-  // --- Documents attached to a proposal (issue #44, ?before=<ledger> cursor) ---
+  // --- Documents attached to proposals (issue #44, ?before=<ledger> cursor) ---
   // One row per `doc_attn` event — existence/history only, never the content
   // hash (still read live from the contract via get_document). A single
-  // `?kind=&proposal_id=` endpoint rather than two per-family routes: loan
-  // and treasury proposal ids are drawn from independent sequences and
-  // collide, so `kind` is required alongside `proposal_id` either way, and
-  // one route keeps the pagination/validation logic in one place.
+  // endpoint rather than per-family routes: loan and treasury proposal ids are
+  // drawn from independent sequences and collide, so `proposal_id` is only
+  // meaningful alongside `kind`, and one route keeps the pagination/validation
+  // logic in one place.
+  //
+  // Issue #189: every filter is optional, like the other list endpoints —
+  // no filter lists all documents newest-ledger-first, `?caller=` a member's
+  // attachment history, `?kind=` one proposal family. `?kind=&proposal_id=`
+  // is the original per-proposal query, unchanged. Each shape has an index:
+  // documents_proposal_idx, documents_caller_idx, documents_ledger_idx.
   app.get('/documents', async (req, reply) => {
     const q = req.query as Record<string, unknown>
     if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
-    
+
     setCachePolicy(reply, historicalOrLive(before !== null))
-    
+
+    const params: unknown[] = []
+    const conditions: string[] = []
     const kind = q.kind
-    if (kind !== 'loan' && kind !== 'treasury') {
-      return reply.code(400).send({ error: 'kind query param must be "loan" or "treasury"' })
+    if (kind !== undefined || q.proposal_id !== undefined) {
+      if (kind !== 'loan' && kind !== 'treasury') {
+        return reply.code(400).send({ error: 'kind query param must be "loan" or "treasury"' })
+      }
+      params.push(kind)
+      conditions.push(`kind = $${params.length}`)
     }
-    if (typeof q.proposal_id !== 'string' || !/^[0-9]+$/.test(q.proposal_id)) {
-      return reply.code(400).send({ error: 'proposal_id query param is required' })
+    if (q.proposal_id !== undefined) {
+      if (typeof q.proposal_id !== 'string' || !/^[0-9]+$/.test(q.proposal_id)) {
+        return reply.code(400).send({ error: 'proposal_id query param is required' })
+      }
+      params.push(Number(q.proposal_id))
+      conditions.push(`proposal_id = $${params.length}`)
     }
-    const proposalId = Number(q.proposal_id)
-    const params: unknown[] = [kind, proposalId]
-    let where = `WHERE kind = $1 AND proposal_id = $2`
+    if (q.caller !== undefined) {
+      if (typeof q.caller !== 'string' || !validAddress(q.caller)) {
+        return reply.code(400).send({ error: 'invalid Stellar address' })
+      }
+      params.push(q.caller)
+      conditions.push(`caller = $${params.length}`)
+    }
     if (before !== null) {
       params.push(before)
-      where += ` AND ledger < $${params.length}`
+      conditions.push(`ledger < $${params.length}`)
     }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
     params.push(l)
     return query<DocumentRow>(
       `SELECT id, proposal_id, kind, caller, ledger, tx_hash, attached_at

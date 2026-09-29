@@ -279,6 +279,9 @@ CREATE TABLE IF NOT EXISTS documents (
   attached_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS documents_proposal_idx ON documents (kind, proposal_id, ledger DESC);
+-- Issue #189: unfiltered and per-caller listings (migration 0025).
+CREATE INDEX IF NOT EXISTS documents_caller_idx ON documents (caller, ledger DESC, id DESC);
+CREATE INDEX IF NOT EXISTS documents_ledger_idx ON documents (ledger DESC, id DESC);
 
 -- Authentication nonces for Stellar-signed login (issues #63, #66, #179, #180)
 -- Keyed on nonce (primary key) with a non-unique index on address to support:

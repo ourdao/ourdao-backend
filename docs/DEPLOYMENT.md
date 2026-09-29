@@ -382,7 +382,7 @@ Migrations run automatically on boot, so starting the previous image does **not*
 | `0017_approved_pending_disbursement_status` | **breaking** — widens the status `CHECK` | Rows may hold `approved_pending_disbursement`, which a release predating it does not handle. Reindex is not enough if it has already folded such rows; roll forward. |
 | `0022_failed_events_uniqueness` | **breaking** — `UNIQUE(event_id)` | A release predating it inserts into `failed_events` without `ON CONFLICT`, so a repeat failure of the same event errors on the quarantine path. |
 | `0024_auth_nonces_rekey` | **breaking** — rekeys `auth_nonces` on `nonce` | A release predating it assumes one row per address; outstanding challenges are the only data at stake, so rolling forward is the fix. |
-| all others (`0002`–`0010`, `0013`, `0015`, `0016`, `0018`–`0021`, `0023`) | backward-compatible | Additive columns/tables/indexes; safe to roll back across. |
+| all others (`0002`–`0010`, `0013`, `0015`, `0016`, `0018`–`0021`, `0023`, `0025`) | backward-compatible | Additive columns/tables/indexes; safe to roll back across. |
 
 Versions `0011` and `0014` are unused (gaps are allowed; see the loader in `src/db/migrate.ts`).
 

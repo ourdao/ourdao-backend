@@ -255,7 +255,7 @@ Base path: `/api`.
 **Events & History:**
 - `GET /api/events` — Raw event feed (optional filters: `?symbol=`, `?contract=`, `?before=`, `?after=`, `?order=`)
 - `GET /api/interest` — Interest distribution history
-- `GET /api/documents?kind=&proposal_id=` — Proposal document attachment history
+- `GET /api/documents` — Document attachment history, newest ledger first. All filters optional and combinable: `?kind=loan|treasury`, `?proposal_id=` (requires `kind` — loan and treasury ids collide), `?caller=<G… address>` (a member's attachments), plus `?before=<ledger>` and `?limit=`
 
 **Admin:**
 - `GET /api/admin/log` — Admin/governance audit trail
