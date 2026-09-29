@@ -72,6 +72,10 @@ describe('resolveConfig', () => {
         streamRetryAfterSeconds: 30,
         logLevel: 'info',
         readyCheckTimeoutMs: 3000,
+        bodyLimitBytes: 16384,
+        requestTimeoutMs: 30000,
+        connectionTimeoutMs: 60000,
+        keepAliveTimeoutMs: 72000,
       },
       db: {
         connectionString: undefined,

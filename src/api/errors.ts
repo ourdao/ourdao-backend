@@ -1,4 +1,7 @@
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import { randomUUID } from 'node:crypto'
+import { STATUS_CODES } from 'node:http'
+import type { Socket } from 'node:net'
 
 /**
  * Stable, machine-readable error codes (issue #186). Clients branch on these,
@@ -45,6 +48,10 @@ export interface ErrorEnvelope {
   error: string
   code: ErrorCode
   correlationId: string
+}
+
+function isErrorCode(value: unknown): value is ErrorCode {
+  return (ERROR_CODES as readonly unknown[]).includes(value)
 }
 
 /**
@@ -164,12 +171,14 @@ export function registerErrorHandling(app: FastifyInstance): void {
   // rate limiter with its own body). Stamp every such object with a status-
   // derived `code` and the `correlationId` here, once, so no failure response
   // can leave without them (issue #186). A body that already chose its code
-  // (the handlers above) keeps it.
+  // (the handlers above) keeps it; any other `code` (a plugin's own, say)
+  // is replaced so only documented codes ever reach a client.
   app.addHook('preSerialization', async (req, reply, payload) => {
     if (reply.statusCode < 400 || payload === null || typeof payload !== 'object') return payload
     const body = payload as Record<string, unknown>
     if (typeof body.error !== 'string') return payload
-    return { ...body, code: body.code ?? codeForStatus(reply.statusCode), correlationId: body.correlationId ?? req.id }
+    const code = isErrorCode(body.code) ? body.code : codeForStatus(reply.statusCode)
+    return { ...body, code, correlationId: body.correlationId ?? req.id }
   })
 
   app.setErrorHandler((err: FastifyError, req: FastifyRequest, reply: FastifyReply) => {
@@ -195,4 +204,42 @@ export function registerErrorHandling(app: FastifyInstance): void {
 
     reply.code(status).send({ error, code, correlationId: req.id } satisfies ErrorEnvelope)
   })
+}
+
+/**
+ * Fastify `clientErrorHandler`: answers failures Node detects before a request
+ * ever reaches Fastify — a request not received within `requestTimeout`
+ * (408), oversized headers (431), a malformed request (400) — with the same
+ * envelope as everything else (issues #186, #187). Otherwise mirrors
+ * Fastify's default handler. There is no request yet, so the correlation id
+ * is minted here and logged alongside the error.
+ */
+export function clientErrorHandler(this: FastifyInstance, err: NodeJS.ErrnoException, socket: Socket): void {
+  if (err.code === 'ECONNRESET' || socket.destroyed) return
+  const status = err.code === 'ERR_HTTP_REQUEST_TIMEOUT' ? 408 : err.code === 'HPE_HEADER_OVERFLOW' ? 431 : 400
+  const correlationId = randomUUID()
+  const envelope: ErrorEnvelope = { error: STATUS_CODES[status]!, code: codeForStatus(status), correlationId }
+  const body = JSON.stringify(envelope)
+  this.log.debug({ err, correlationId, statusCode: status }, 'client error before request dispatch')
+  if (socket.writable) {
+    socket.write(
+      `HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nContent-Length: ${Buffer.byteLength(body)}\r\n` +
+        `Content-Type: application/json\r\nConnection: close\r\n\r\n${body}`
+    )
+  }
+  socket.destroy(err)
+}
+
+/**
+ * Fastify `frameworkErrors`: router-level rejections (a path parameter over
+ * `maxParamLength` → 414, a malformed URL → 400) otherwise bypass every hook
+ * and are written raw by Fastify, without `code` or `correlationId`. Hooks
+ * don't run on this path either, so the envelope is built here in full
+ * (issues #186, #187).
+ */
+export function frameworkErrors(err: FastifyError, req: FastifyRequest, reply: FastifyReply): void {
+  const status = err.statusCode ?? 400
+  reply
+    .code(status)
+    .send({ error: STATUS_CODES[status] ?? 'Bad Request', code: codeForStatus(status), correlationId: req.id } satisfies ErrorEnvelope)
 }

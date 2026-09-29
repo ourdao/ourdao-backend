@@ -227,6 +227,10 @@ All configuration is environment-driven. See [`.env.example`](../.env.example) f
 | `STATS_MAX_CONCURRENT` | `1` | Per-process cap for uncached stats recomputations; excess requests get `503`. |
 | `STATS_RETRY_AFTER_SECONDS` | `1` | Retry delay sent with a shed stats response. |
 | `TRUST_PROXY` | `false` | **Set to `true` behind a reverse proxy.** |
+| `HTTP_BODY_LIMIT_BYTES` | `16384` | Max request body; larger bodies get `413 PAYLOAD_TOO_LARGE`. The API is read-only, so there is rarely a reason to raise it. |
+| `HTTP_REQUEST_TIMEOUT_MS` | `30000` | Max time to receive a complete request (headers + body); a stalled request gets `408 REQUEST_TIMEOUT` and the socket is closed. Node checks this every 30s, so a stalled request is closed within this value + 30s. Does not limit response time — SSE streams are unaffected. `0` disables. |
+| `HTTP_CONNECTION_TIMEOUT_MS` | `60000` | Socket inactivity timeout. Keep it above the 30s SSE heartbeat. `0` disables. |
+| `HTTP_KEEP_ALIVE_TIMEOUT_MS` | `72000` | Idle keep-alive timeout. **Keep it above your load balancer's idle timeout** (e.g. 60s on AWS ALB), or the LB may reuse a socket the server just closed and return `502`. |
 
 ---
 

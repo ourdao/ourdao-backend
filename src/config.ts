@@ -105,6 +105,22 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // and never sends a response body. Kept below typical liveness/readiness
     // probe timeouts (a few seconds) so it always resolves first.
     readyCheckTimeoutMs: int(env, 'READY_CHECK_TIMEOUT_MS', 3_000),
+    // Issue #187: server limits set deliberately rather than inherited.
+    // Max request body. The API is read-only — the only non-GET routes are
+    // two body-less PATCHes — so Fastify's 1 MiB default is far more than
+    // any legitimate request needs.
+    bodyLimitBytes: int(env, 'HTTP_BODY_LIMIT_BYTES', 16 * 1024),
+    // Max time to receive a *complete request* (headers and body) — not the
+    // response, so long-lived SSE streams are unaffected. Without it a client
+    // can dribble a partial request and hold a socket forever. `0` disables.
+    requestTimeoutMs: int(env, 'HTTP_REQUEST_TIMEOUT_MS', 30_000),
+    // Socket inactivity timeout. Must stay above the SSE heartbeat interval
+    // (30s) so an idle-but-healthy stream is never cut. `0` disables.
+    connectionTimeoutMs: int(env, 'HTTP_CONNECTION_TIMEOUT_MS', 60_000),
+    // How long an idle keep-alive socket is held between requests. Keep it
+    // above the load balancer's idle timeout (60s on AWS ALB, for example),
+    // otherwise the LB can reuse a socket the server just closed → 502s.
+    keepAliveTimeoutMs: int(env, 'HTTP_KEEP_ALIVE_TIMEOUT_MS', 72_000),
   },
   db: {
     // pg reads PG* env vars automatically; connectionString wins when set.

@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { randomUUID } from 'node:crypto'
+import type { ServerOptions } from 'node:http'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import etag from '@fastify/etag'
@@ -8,7 +9,7 @@ import swaggerUi from '@fastify/swagger-ui'
 import { config } from '../config.js'
 import { pool } from '../db/index.js'
 import { registerCachePolicy } from './cache-policy.js'
-import { registerErrorHandling } from './errors.js'
+import { clientErrorHandler, frameworkErrors, registerErrorHandling } from './errors.js'
 import { registerRoutes } from './routes/index.js'
 import { MemoryNonceStore, PostgresNonceStore, type NonceStore } from '../auth.js'
 import { readFileSync } from 'fs'
@@ -50,7 +51,19 @@ export interface BuildServerOptions {
    * failure's full detail (and its correlation id) reach the log.
    */
   logger?: FastifyServerOptions['logger']
+  /**
+   * Extra Fastify options, applied last. Tests use it to shrink the server
+   * timeouts (issue #187) to something a test can wait out.
+   */
+  serverOptions?: Partial<FastifyServerOptions> & { http?: ServerOptions }
 }
+
+/**
+ * Longest path parameter the router accepts (Fastify's default, pinned —
+ * issue #187). The longest legitimate one is a 56-character Stellar `G…`
+ * address in `/members/:address`; ids are integers. Longer values get a 414.
+ */
+export const MAX_PARAM_LENGTH = 100
 
 export async function buildServer(opts: BuildServerOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
@@ -59,6 +72,15 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     // The request id doubles as the error-envelope correlation id (issue #81),
     // so make it a random uuid rather than the default per-process counter.
     genReqId: () => randomUUID(),
+    // Issue #187: explicit limits instead of inherited defaults (see config.ts).
+    bodyLimit: config.http.bodyLimitBytes,
+    requestTimeout: config.http.requestTimeoutMs,
+    connectionTimeout: config.http.connectionTimeoutMs,
+    keepAliveTimeout: config.http.keepAliveTimeoutMs,
+    routerOptions: { maxParamLength: MAX_PARAM_LENGTH },
+    clientErrorHandler,
+    frameworkErrors,
+    ...opts.serverOptions,
   })
 
   // One error shape for every failure — installed before routes so every child
