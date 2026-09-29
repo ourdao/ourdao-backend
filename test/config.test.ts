@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
 import { describe, expect, it, vi } from 'vitest'
 import {
   assertContractConfigured,
@@ -136,5 +138,28 @@ describe('assertContractConfigured', () => {
 
   it('returns the configured contract id', () => {
     expect(assertContractConfigured(resolveConfig({ CONTRACT_ID: 'C123' }))).toBe('C123')
+  })
+})
+
+describe('.env.example completeness (issue #226)', () => {
+  it('documents every environment variable read by src/config.ts', () => {
+    const root = resolve(import.meta.dirname, '..')
+    const configSource = readFileSync(resolve(root, 'src/config.ts'), 'utf8')
+    const envExample = readFileSync(resolve(root, '.env.example'), 'utf8')
+
+    const helperReads = [...configSource.matchAll(/\b(?:int|str|bool|logLevel|nonceStore)\(env,\s*'([A-Z0-9_]+)'/g)].map(
+      (m) => m[1]!
+    )
+    const directReads = [...configSource.matchAll(/\benv\.([A-Z0-9_]+)\b/g)].map((m) => m[1]!)
+    const allConfigVars = [...new Set([...helperReads, ...directReads])]
+
+    expect(allConfigVars.length).toBeGreaterThan(0)
+
+    const definedInExample = new Set(
+      [...envExample.matchAll(/^([A-Z0-9_]+)=/gm)].map((m) => m[1]!)
+    )
+
+    const missing = allConfigVars.filter((name) => !definedInExample.has(name))
+    expect(missing).toEqual([])
   })
 })
