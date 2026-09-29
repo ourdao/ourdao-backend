@@ -4,7 +4,7 @@
 # To update: `docker pull node:20-alpine`, then `docker image inspect node:20-alpine --format '{{.RepoDigests}}'`
 # and use the sha256 digest from the output.
 # Current tag: node:20-alpine (as of 2026-09-27)
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
+FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS build
 WORKDIR /app
 # No `*` glob — a missing lockfile must fail the build, not silently proceed.
 COPY package.json package-lock.json ./
@@ -15,7 +15,7 @@ COPY src ./src
 RUN npm run build
 
 # ---- runtime ----
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
+FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
