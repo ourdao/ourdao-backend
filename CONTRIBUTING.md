@@ -88,6 +88,7 @@ and changing authentication are breaking changes and require a versioned
 path. Consumer-facing changes must link the corresponding
 `ourdao-frontend` issue or pull request so reviewers can verify rollout order.
 
+- **Error codes are append-only.** Every error response carries a stable `code` from `ERROR_CODES` in `src/api/errors.ts`, and clients branch on it. Treat the list the way `ourdao-contracts` treats its error variants: never rename, remove or repurpose a code — add a new one, and document it in the README's Errors table (`test/api-error-envelope.test.ts` fails on an undocumented code). A route that returns a deliberate error just sends `{ error }` with the right status; the status-derived `code` and `correlationId` are added for it.
 - **This service is strictly read-only with respect to the chain.** It never holds a private key, never signs, and never submits a transaction. Any pull request that introduces a signing path, a key in config, or an outbound write to the network will be rejected regardless of quality — that's an architectural boundary, not a preference.
 - **The `events` table is append-only.** Raw indexed events are the audit trail. Derived tables (`members`, `loans`, `loan_proposals`, `treasury_proposals`, `notifications`) are rebuilt from it. Don't mutate or delete rows in `events`.
 - **Event folding stays transactional.** Writing a raw event and folding it into derived tables happens inside one database transaction so a crash can't leave them inconsistent. New event handlers must preserve that.

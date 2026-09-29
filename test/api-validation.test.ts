@@ -70,7 +70,7 @@ describe('API: pagination and path validation (#54, #55)', () => {
     try {
       const res = await app.inject({ method: 'GET', url: '/api/loans?borrower=not-a-stellar-address' })
       expect(res.statusCode).toBe(400)
-      expect(res.json()).toEqual({ error: 'invalid Stellar address' })
+      expect(res.json()).toEqual({ error: 'invalid Stellar address', code: 'BAD_REQUEST', correlationId: expect.any(String) })
       expect(spy).not.toHaveBeenCalled()
     } finally {
       spy.mockRestore()

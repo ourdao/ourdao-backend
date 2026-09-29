@@ -1,18 +1,68 @@
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 
 /**
+ * Stable, machine-readable error codes (issue #186). Clients branch on these,
+ * never on the `error` text, which may be reworded at any time.
+ *
+ * Append-only, like ourdao-contracts' error variants: never rename, remove or
+ * repurpose a code — add a new one. Every code is documented in the README's
+ * "Errors" section.
+ */
+export const ERROR_CODES = [
+  'BAD_REQUEST',
+  'VALIDATION_FAILED',
+  'UNAUTHORIZED',
+  'FORBIDDEN',
+  'NOT_FOUND',
+  'ROUTE_NOT_FOUND',
+  'REQUEST_TIMEOUT',
+  'PAYLOAD_TOO_LARGE',
+  'RATE_LIMITED',
+  'CLIENT_ERROR',
+  'RESOURCE_ALREADY_EXISTS',
+  'RELATED_DATA_CONFLICT',
+  'CONSTRAINT_VIOLATION',
+  'MISSING_REQUIRED_VALUE',
+  'DATABASE_UNAVAILABLE',
+  'SERVICE_UNAVAILABLE',
+  'INTERNAL_ERROR',
+] as const
+
+export type ErrorCode = (typeof ERROR_CODES)[number]
+
+/**
  * The single error envelope every failure response uses (issue #81).
  *
  * `error` is a short, safe, human-readable string — the same `{ error: string }`
  * shape the route handlers already return for their deliberate 4xx responses,
- * so existing clients keep working. `correlationId` is the Fastify request id:
- * it is echoed in the `x-correlation-id` response header and printed (as
- * `reqId`) on the server-side log line for the same request, so a user-reported
- * failure can be traced to its log entry.
+ * so existing clients keep working. `code` is the stable machine-readable
+ * cause (issue #186). `correlationId` is the Fastify request id: it is echoed
+ * in the `x-correlation-id` response header and printed (as `reqId`) on the
+ * server-side log line for the same request, so a user-reported failure can
+ * be traced to its log entry.
  */
 export interface ErrorEnvelope {
   error: string
+  code: ErrorCode
   correlationId: string
+}
+
+/**
+ * The code for a response that only knows its status — a route's deliberate
+ * `reply.code(4xx).send({ error })`, a plugin's error, a thrown `statusCode`.
+ */
+export function codeForStatus(status: number): ErrorCode {
+  switch (status) {
+    case 400: return 'BAD_REQUEST'
+    case 401: return 'UNAUTHORIZED'
+    case 403: return 'FORBIDDEN'
+    case 404: return 'NOT_FOUND'
+    case 408: return 'REQUEST_TIMEOUT'
+    case 413: return 'PAYLOAD_TOO_LARGE'
+    case 429: return 'RATE_LIMITED'
+    case 503: return 'SERVICE_UNAVAILABLE'
+    default: return status >= 400 && status < 500 ? 'CLIENT_ERROR' : 'INTERNAL_ERROR'
+  }
 }
 
 // Postgres surfaces a failure as a five-character SQLSTATE on `err.code`. A few
@@ -20,11 +70,11 @@ export interface ErrorEnvelope {
 // (which name columns, constraints and types) is never put in a response — only
 // logged. Everything else with a SQLSTATE is an unexpected internal failure and
 // collapses to a generic 500.
-const PG_STATUS: Record<string, { status: number; error: string }> = {
-  '23505': { status: 409, error: 'resource already exists' }, // unique_violation
-  '23503': { status: 409, error: 'request conflicts with related data' }, // foreign_key_violation
-  '23514': { status: 422, error: 'request violates a data constraint' }, // check_violation
-  '23502': { status: 422, error: 'request is missing a required value' }, // not_null_violation
+const PG_STATUS: Record<string, { status: number; error: string; code: ErrorCode }> = {
+  '23505': { status: 409, error: 'resource already exists', code: 'RESOURCE_ALREADY_EXISTS' }, // unique_violation
+  '23503': { status: 409, error: 'request conflicts with related data', code: 'RELATED_DATA_CONFLICT' }, // foreign_key_violation
+  '23514': { status: 422, error: 'request violates a data constraint', code: 'CONSTRAINT_VIOLATION' }, // check_violation
+  '23502': { status: 422, error: 'request is missing a required value', code: 'MISSING_REQUIRED_VALUE' }, // not_null_violation
 }
 
 // Connection-level failures: the database is unreachable or shutting down.
@@ -52,7 +102,7 @@ interface MaybePgError {
  *
  * Exported for direct unit testing of the pg-error mapping.
  */
-export function classifyError(err: unknown): { status: number; error: string; leak: boolean } {
+export function classifyError(err: unknown): { status: number; error: string; code: ErrorCode; leak: boolean } {
   const e = (err ?? {}) as FastifyError & MaybePgError
 
   // 1. Fastify schema-validation errors. Until issue #55 gives these their own
@@ -60,13 +110,13 @@ export function classifyError(err: unknown): { status: number; error: string; le
   //    offending field and is safe and useful, so keep it; only the envelope
   //    is normalised.
   if (e.validation) {
-    return { status: e.statusCode ?? 400, error: e.message, leak: false }
+    return { status: e.statusCode ?? 400, error: e.message, code: 'VALIDATION_FAILED', leak: false }
   }
 
   // 2. Postgres driver errors — map a known SQLSTATE, never surface its text.
   const code = e.code
   if (code && PG_CONNECTION_CODES.has(code)) {
-    return { status: 503, error: 'database temporarily unavailable', leak: true }
+    return { status: 503, error: 'database temporarily unavailable', code: 'DATABASE_UNAVAILABLE', leak: true }
   }
   if (code && PG_STATUS[code]) {
     return { ...PG_STATUS[code], leak: true }
@@ -74,7 +124,7 @@ export function classifyError(err: unknown): { status: number; error: string; le
   if (code && /^[0-9A-Z]{5}$/.test(code)) {
     // Any other SQLSTATE (e.g. 22P02 invalid_text_representation, 22003 numeric
     // overflow) is a real internal failure — the message describes the schema.
-    return { status: 500, error: 'internal server error', leak: true }
+    return { status: 500, error: 'internal server error', code: 'INTERNAL_ERROR', leak: true }
   }
 
   // 3. A deliberate non-pg error that already chose a 4xx status (an explicit
@@ -82,11 +132,12 @@ export function classifyError(err: unknown): { status: number; error: string; le
   //    purpose — keep it.
   const status = e.statusCode ?? 500
   if (status >= 400 && status < 500) {
-    return { status, error: e.message || 'bad request', leak: false }
+    return { status, error: e.message || 'bad request', code: codeForStatus(status), leak: false }
   }
 
   // 4. Everything else is a 5xx. Never echo the message.
-  return { status: status >= 500 && status <= 599 ? status : 500, error: 'internal server error', leak: true }
+  const status5xx = status >= 500 && status <= 599 ? status : 500
+  return { status: status5xx, error: 'internal server error', code: codeForStatus(status5xx), leak: true }
 }
 
 /**
@@ -106,11 +157,23 @@ export function registerErrorHandling(app: FastifyInstance): void {
 
   // Unmatched routes get the same envelope as everything else.
   app.setNotFoundHandler((req, reply) => {
-    reply.code(404).send({ error: 'route not found', correlationId: req.id } satisfies ErrorEnvelope)
+    reply.code(404).send({ error: 'route not found', code: 'ROUTE_NOT_FOUND', correlationId: req.id } satisfies ErrorEnvelope)
+  })
+
+  // Routes answer their deliberate 4xx/5xx with a bare `{ error }` (and the
+  // rate limiter with its own body). Stamp every such object with a status-
+  // derived `code` and the `correlationId` here, once, so no failure response
+  // can leave without them (issue #186). A body that already chose its code
+  // (the handlers above) keeps it.
+  app.addHook('preSerialization', async (req, reply, payload) => {
+    if (reply.statusCode < 400 || payload === null || typeof payload !== 'object') return payload
+    const body = payload as Record<string, unknown>
+    if (typeof body.error !== 'string') return payload
+    return { ...body, code: body.code ?? codeForStatus(reply.statusCode), correlationId: body.correlationId ?? req.id }
   })
 
   app.setErrorHandler((err: FastifyError, req: FastifyRequest, reply: FastifyReply) => {
-    const { status, error, leak } = classifyError(err)
+    const { status, error, code, leak } = classifyError(err)
 
     if (leak || status >= 500) {
       // Log with full detail — the log line carries `reqId`, the same value as
@@ -130,6 +193,6 @@ export function registerErrorHandling(app: FastifyInstance): void {
       req.log.info({ statusCode: status }, `request rejected: ${error}`)
     }
 
-    reply.code(status).send({ error, correlationId: req.id } satisfies ErrorEnvelope)
+    reply.code(status).send({ error, code, correlationId: req.id } satisfies ErrorEnvelope)
   })
 }
