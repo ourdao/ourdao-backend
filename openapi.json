@@ -3,7 +3,7 @@
   "info": {
     "title": "OurDAO Backend API",
     "description": "Off-chain indexer + read API for the OurDAO lending DAO on Stellar/Soroban",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "components": {
     "schemas": {}

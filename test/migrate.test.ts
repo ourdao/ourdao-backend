@@ -162,3 +162,35 @@ describe('migrate()', () => {
     expect(eventIdCol.rows).toHaveLength(1)
   })
 })
+
+describe('0024_auth_nonces_rekey.sql against a database that predates it', () => {
+  it('rekeys the old address-keyed auth_nonces table without colliding with schema.sql indexes', async () => {
+    await ensureSchema()
+    // Rebuild the pre-#180 shape (0018's table) and forget 0024 ran, so the
+    // next migrate() takes the real "predates the migration" path: schema.sql
+    // runs first (creating its IF NOT EXISTS indexes on the old table), then
+    // 0024's SQL for real.
+    await pool.query('DROP TABLE auth_nonces')
+    await pool.query(`CREATE TABLE auth_nonces (
+      address TEXT NOT NULL, nonce TEXT NOT NULL,
+      expires_at TIMESTAMP NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT now(),
+      UNIQUE (address))`)
+    await pool.query(`INSERT INTO auth_nonces (address, nonce, expires_at) VALUES ('GLIVE', 'n1', now() + interval '1 hour')`)
+    await pool.query('DELETE FROM schema_migrations WHERE version = 24')
+
+    await expect(migrate()).resolves.toBeUndefined()
+
+    const pk = await pool.query<{ column_name: string }>(
+      `SELECT a.attname AS column_name FROM pg_index i
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = 'auth_nonces'::regclass AND i.indisprimary`
+    )
+    expect(pk.rows.map((r) => r.column_name)).toEqual(['nonce'])
+    const rows = await pool.query('SELECT address, nonce FROM auth_nonces')
+    expect(rows.rows).toEqual([{ address: 'GLIVE', nonce: 'n1' }])
+    const idx = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes WHERE tablename = 'auth_nonces' ORDER BY indexname`
+    )
+    expect(idx.rows.map((r) => r.indexname)).toEqual(['auth_nonces_address_idx', 'auth_nonces_expires_at_idx', 'auth_nonces_new_pkey'])
+  })
+})

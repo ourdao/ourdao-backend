@@ -32,6 +32,7 @@ function sign(nonce: string, address: string): string {
 const alwaysValidNonce: NonceStore = {
   issue: async () => 'n',
   consume: async () => true,
+  shutdown: async () => {},
 }
 
 describe('classifyStellarAddress', () => {
@@ -108,7 +109,7 @@ describe('authenticateRequest (issue #70)', () => {
   })
 
   it('keeps existing 401 behaviour for a bad nonce and a bad signature', async () => {
-    const rejectingNonce: NonceStore = { issue: async () => 'n', consume: async () => false }
+    const rejectingNonce: NonceStore = { issue: async () => 'n', consume: async () => false, shutdown: async () => {} }
     const badNonce = await authenticateRequest(headersFor(G), rejectingNonce)
     expect(badNonce).toMatchObject({ authenticated: false, status: 401 })
 
@@ -282,7 +283,7 @@ describe('authenticateRequest — characterization (#72)', () => {
       error: 'Missing authentication headers',
     })
     expect(
-      await authenticateRequest(headersFor(G, 'n'), { issue: async () => 'n', consume: async () => false }),
+      await authenticateRequest(headersFor(G, 'n'), { issue: async () => 'n', consume: async () => false, shutdown: async () => {} }),
     ).toMatchObject({ error: 'Invalid or expired nonce' })
     expect(
       await authenticateRequest({ authorization: `StellarSignature ${G}:bm90LXNpZw:n` }, alwaysValidNonce),
@@ -332,6 +333,7 @@ describe('structured logging, not console (issues #132, #133)', () => {
     const warnCalls: string[] = []
     const logger: AuthLogger = {
       debug: (msg) => debugCalls.push(msg),
+      info: () => {},
       warn: (msg) => warnCalls.push(msg),
       error: () => {},
     }
@@ -380,7 +382,7 @@ describe('structured logging, not console (issues #132, #133)', () => {
     const { logger, warnCalls } = fakeLogger()
     const res = await authenticateRequest(
       { authorization: `StellarSignature ${G}:bm90LXNpZw:n` },
-      { issue: async () => 'n', consume: async () => true },
+      { issue: async () => 'n', consume: async () => true, shutdown: async () => {} },
       undefined,
       logger,
     )

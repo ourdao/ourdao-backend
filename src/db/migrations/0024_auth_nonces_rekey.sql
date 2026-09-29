@@ -1,3 +1,4 @@
+-- compat: breaking (drops and recreates auth_nonces keyed on nonce instead of address; a previous release relying on one row per address cannot run against it, and rolling back cannot restore the old table)
 -- Migration: Re-key auth_nonces to support multiple outstanding nonces per address (issues #179, #180)
 --
 -- Prior to this migration, auth_nonces was keyed on (address), so an address could
@@ -15,6 +16,14 @@
 -- 2. Recreate with new schema
 -- 3. Copy any unexpired rows from _old
 -- 4. Drop _old
+
+-- Renumbered from 0022 (it collided with 0022_failed_events_uniqueness.sql,
+-- which made the loader refuse to boot). On an existing database schema.sql
+-- runs first and has already created auth_nonces_expires_at_idx /
+-- auth_nonces_address_idx on the *old* table, so drop them before reusing
+-- the names on the new one.
+DROP INDEX IF EXISTS auth_nonces_expires_at_idx;
+DROP INDEX IF EXISTS auth_nonces_address_idx;
 
 -- Create new table with nonce as primary key
 CREATE TABLE auth_nonces_new (

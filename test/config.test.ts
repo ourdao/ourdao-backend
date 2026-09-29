@@ -76,9 +76,14 @@ describe('resolveConfig', () => {
       db: {
         connectionString: undefined,
         nonceStore: 'postgres',
+        nonceTtlMs: 300000,
+        nonceMaxEntries: 10000,
+        nonceSweepIntervalMs: 60000,
         poolMax: 10,
         statementTimeoutMs: 10000,
         connectionTimeoutMs: 5000,
+        idleTimeoutMs: 30000,
+        applicationName: 'ourdao-api',
       },
       stellar: {
         contractId: '',
