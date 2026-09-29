@@ -2,6 +2,106 @@ import { Keypair, StrKey, MuxedAccount } from '@stellar/stellar-sdk'
 import { randomBytes } from 'crypto'
 import type { Pool } from 'pg'
 
+// Authentication failure counters (issue #183)
+export const authStats = {
+  challengesIssued: 0,
+  verificationsSucceeded: 0,
+  verificationsFailed: {
+    missingHeaders: 0,
+    invalidNonce: 0,
+    invalidSignature: 0,
+    addressMismatch: 0,
+    malformedEncoding: 0,
+    unsupportedAddressType: 0,
+  },
+}
+
+// Per-address failure tracking for exponential backoff (issue #184)
+interface FailureRecord {
+  count: number
+  lastFailureAt: number
+  nextAllowedAt: number
+}
+
+export class AuthFailureTracker {
+  private failures = new Map<string, FailureRecord>()
+  private readonly BASE_BACKOFF_MS = 1000 // 1 second
+  private readonly MAX_BACKOFF_MS = 60000 // 1 minute
+  private readonly FAILURE_WINDOW_MS = 300000 // 5 minutes
+  private cleanupTimer: NodeJS.Timeout | null = null
+
+  constructor() {
+    // Clean up old failure records every minute
+    this.cleanupTimer = setInterval(() => {
+      const now = Date.now()
+      const staleThreshold = now - this.FAILURE_WINDOW_MS
+      for (const [address, record] of this.failures.entries()) {
+        if (record.lastFailureAt < staleThreshold) {
+          this.failures.delete(address)
+        }
+      }
+    }, 60000)
+    if (this.cleanupTimer.unref) {
+      this.cleanupTimer.unref()
+    }
+  }
+
+  shutdown(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer)
+      this.cleanupTimer = null
+    }
+  }
+
+  /** Check if an authentication attempt is allowed for this address */
+  isAllowed(address: string): boolean {
+    const record = this.failures.get(address)
+    if (!record) return true
+    return Date.now() >= record.nextAllowedAt
+  }
+
+  /** Get remaining backoff time in milliseconds, or 0 if allowed */
+  getRemainingBackoff(address: string): number {
+    const record = this.failures.get(address)
+    if (!record) return 0
+    const remaining = record.nextAllowedAt - Date.now()
+    return Math.max(0, remaining)
+  }
+
+  /** Record a failed authentication attempt and calculate new backoff */
+  recordFailure(address: string): void {
+    const now = Date.now()
+    const existing = this.failures.get(address)
+    
+    if (existing && now - existing.lastFailureAt < this.FAILURE_WINDOW_MS) {
+      // Within failure window - increment count and increase backoff
+      const newCount = existing.count + 1
+      // Exponential backoff: 2^(count-1) * BASE_BACKOFF_MS, capped at MAX
+      const backoffMs = Math.min(
+        Math.pow(2, newCount - 1) * this.BASE_BACKOFF_MS,
+        this.MAX_BACKOFF_MS
+      )
+      this.failures.set(address, {
+        count: newCount,
+        lastFailureAt: now,
+        nextAllowedAt: now + backoffMs,
+      })
+    } else {
+      // First failure or outside window - reset to base backoff
+      this.failures.set(address, {
+        count: 1,
+        lastFailureAt: now,
+        nextAllowedAt: now + this.BASE_BACKOFF_MS,
+      })
+    }
+  }
+
+  /** Clear failure record on successful authentication */
+  recordSuccess(address: string): void {
+    this.failures.delete(address)
+  }
+}
+
 // Minimal structural subset of the Fastify/Pino logger — just what auth needs
 // to log through the request's logger instead of `console.*` (issue #132),
 // so `LOG_LEVEL` applies and log lines carry the request correlation id.
@@ -9,6 +109,7 @@ export interface AuthLogger {
   debug(msg: string): void
   warn(msg: string): void
   error(msg: string): void
+  info(msg: string): void
 }
 
 // Typed error for nonce store capacity exceeded (issue #135)
@@ -85,6 +186,8 @@ export class MemoryNonceStore implements NonceStore {
         // This prevents an attacker from invalidating a victim's nonce
         // and also prevents self-invalidation from multiple tabs
         logger?.debug(`[auth] Returning existing nonce for ${truncateAddress(address)}, expires in ${Math.floor((existingEntry.expiresAt - now) / 1000)}s`)
+        logger?.info(`[auth] challenge issued (existing): address=${truncateAddress(address)} nonce_age_sec=${Math.floor((now - (existingEntry.expiresAt - this.TTL_MS)) / 1000)}`)
+        authStats.challengesIssued++
         return existingEntry.nonce
       } else {
         // Nonce has expired, clean it up
@@ -105,6 +208,8 @@ export class MemoryNonceStore implements NonceStore {
       expiresAt: now + this.TTL_MS
     })
     
+    logger?.info(`[auth] challenge issued (new): address=${truncateAddress(address)}`)
+    authStats.challengesIssued++
     return nonce
   }
 
@@ -176,6 +281,8 @@ export class PostgresNonceStore implements NonceStore {
       // This prevents an attacker from invalidating a victim's nonce
       // and also prevents self-invalidation from multiple tabs
       logger?.debug(`[auth] Returning existing nonce for ${truncateAddress(address)}`)
+      logger?.info(`[auth] challenge issued (existing): address=${truncateAddress(address)}`)
+      authStats.challengesIssued++
       return existingResult.rows[0].nonce
     }
     
@@ -191,6 +298,8 @@ export class PostgresNonceStore implements NonceStore {
       [address, nonce, expiresAt]
     )
 
+    logger?.info(`[auth] challenge issued (new): address=${truncateAddress(address)}`)
+    authStats.challengesIssued++
     return nonce
   }
 
@@ -239,6 +348,8 @@ export function verifySignature(
   const type = classifyStellarAddress(address)
 
   if (type === 'invalid') {
+    logger?.warn(`[auth] verification failed: reason=unsupported_address_type address=${truncateAddress(address)}`)
+    authStats.verificationsFailed.unsupportedAddressType++
     return { ok: false, status: 400, error: 'Unrecognized Stellar address format' }
   }
 
@@ -247,6 +358,8 @@ export function verifySignature(
   // ed25519 signature at all. Unsupported here; see README "Security notes".
   // Follow-up for `__check_auth` verification: tracked separately.
   if (type === 'contract') {
+    logger?.warn(`[auth] verification failed: reason=unsupported_address_type address=${truncateAddress(address)} type=contract`)
+    authStats.verificationsFailed.unsupportedAddressType++
     return {
       ok: false,
       status: 400,
@@ -262,7 +375,8 @@ export function verifySignature(
     try {
       ed25519Address = MuxedAccount.fromAddress(address, '0').baseAccount().accountId()
     } catch (error) {
-      logger?.warn(`[auth] could not resolve muxed address ${truncateAddress(address)}: ${(error as Error).message}`)
+      logger?.warn(`[auth] verification failed: reason=malformed_muxed_address address=${truncateAddress(address)}`)
+      authStats.verificationsFailed.unsupportedAddressType++
       return { ok: false, status: 400, error: 'Malformed muxed (M…) address' }
     }
   }
@@ -274,8 +388,9 @@ export function verifySignature(
   const signatureBuffer = Buffer.from(signature, 'base64')
   if (signatureBuffer.length !== ED25519_SIGNATURE_BYTES) {
     logger?.warn(
-      `[auth] signature for ${truncateAddress(address)} decoded to ${signatureBuffer.length} bytes (expected ${ED25519_SIGNATURE_BYTES}) — malformed base64`
+      `[auth] verification failed: reason=malformed_encoding address=${truncateAddress(address)} decoded_bytes=${signatureBuffer.length} expected=${ED25519_SIGNATURE_BYTES}`
     )
+    authStats.verificationsFailed.malformedEncoding++
     return { ok: false, status: 401, error: 'Invalid signature' }
   }
 
@@ -283,12 +398,16 @@ export function verifySignature(
   try {
     const keypair = Keypair.fromPublicKey(ed25519Address)
     if (!keypair.verify(data, signatureBuffer)) {
-      logger?.warn(`[auth] signature verification failed for ${truncateAddress(address)} (well-formed, wrong signature or key)`)
+      logger?.warn(`[auth] verification failed: reason=invalid_signature address=${truncateAddress(address)}`)
+      authStats.verificationsFailed.invalidSignature++
       return { ok: false, status: 401, error: 'Invalid signature' }
     }
+    logger?.info(`[auth] verification succeeded: address=${truncateAddress(address)}`)
+    authStats.verificationsSucceeded++
     return { ok: true, ed25519Address }
   } catch (error) {
-    logger?.warn(`[auth] unexpected error verifying signature for ${truncateAddress(address)}: ${(error as Error).message}`)
+    logger?.warn(`[auth] verification failed: reason=invalid_signature address=${truncateAddress(address)} error=${(error as Error).message}`)
+    authStats.verificationsFailed.invalidSignature++
     return { ok: false, status: 401, error: 'Invalid signature' }
   }
 }
@@ -343,12 +462,26 @@ export async function authenticateRequest(
   headers: Record<string, unknown>,
   nonceStore: NonceStore,
   targetAddress?: string,
-  logger?: AuthLogger
+  logger?: AuthLogger,
+  failureTracker?: AuthFailureTracker
 ): Promise<AuthResult> {
   const { address, signature, nonce } = extractAuthHeaders(headers)
 
   if (!address || !signature || !nonce) {
+    logger?.warn(`[auth] authentication failed: reason=missing_headers has_address=${!!address} has_signature=${!!signature} has_nonce=${!!nonce}`)
+    authStats.verificationsFailed.missingHeaders++
     return { authenticated: false, status: 401, error: 'Missing authentication headers' }
+  }
+
+  // Check if this address is currently under backoff (issue #184)
+  if (failureTracker && !failureTracker.isAllowed(address)) {
+    const backoffMs = failureTracker.getRemainingBackoff(address)
+    logger?.warn(`[auth] authentication blocked: reason=backoff address=${truncateAddress(address)} backoff_ms=${backoffMs}`)
+    return { 
+      authenticated: false, 
+      status: 429, 
+      error: `Too many failed attempts. Try again in ${Math.ceil(backoffMs / 1000)} seconds` 
+    }
   }
 
   // Verify the signature first — consuming the nonce before this would let
@@ -356,12 +489,16 @@ export async function authenticateRequest(
   // with a garbage signature, denying the victim's real request (issue #115).
   const sig = verifySignature(address, nonce, signature, logger)
   if (!sig.ok) {
+    failureTracker?.recordFailure(address)
     return { authenticated: false, status: sig.status, error: sig.error }
   }
 
   // Only now consume the nonce, so a bad signature never spends it.
   const nonceValid = await nonceStore.consume(address, nonce)
   if (!nonceValid) {
+    logger?.warn(`[auth] authentication failed: reason=invalid_nonce address=${truncateAddress(address)}`)
+    authStats.verificationsFailed.invalidNonce++
+    failureTracker?.recordFailure(address)
     return { authenticated: false, status: 401, error: 'Invalid or expired nonce' }
   }
 
@@ -370,8 +507,13 @@ export async function authenticateRequest(
   // to act on another address, and this must match the ownership check in
   // PATCH /notifications/:id/read for the same condition (issue #134).
   if (targetAddress && targetAddress !== address) {
+    logger?.warn(`[auth] authentication failed: reason=address_mismatch authenticated=${truncateAddress(address)} target=${truncateAddress(targetAddress)}`)
+    authStats.verificationsFailed.addressMismatch++
+    // Don't count address mismatch toward backoff — it's not a brute-force attempt
     return { authenticated: false, status: 403, error: 'Cannot modify notifications for another address' }
   }
 
+  logger?.info(`[auth] authentication succeeded: address=${truncateAddress(address)}`)
+  failureTracker?.recordSuccess(address)
   return { authenticated: true, address }
 }
