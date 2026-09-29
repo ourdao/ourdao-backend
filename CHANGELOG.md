@@ -15,6 +15,10 @@ Entries that affect deployment or runtime state are annotated:
 ## [Unreleased]
 
 ### Added
+- **Machine-readable error codes**: every error response now carries a stable `code` from an append-only enum (`ERROR_CODES` in `src/api/errors.ts`), documented in the README's Errors table; route-level `4xx` bodies also gain `correlationId`. Additive — `error` is unchanged (#186).
+- **Explicit server limits**: `HTTP_BODY_LIMIT_BYTES` (16 KiB), `HTTP_REQUEST_TIMEOUT_MS` (30s), `HTTP_CONNECTION_TIMEOUT_MS` (60s), `HTTP_KEEP_ALIVE_TIMEOUT_MS` (72s); `maxParamLength` pinned at 100. Stalled requests get `408 REQUEST_TIMEOUT`, oversized bodies `413 PAYLOAD_TOO_LARGE` (#187).
+- **`/api/documents` open listing**: `kind` and `proposal_id` are optional and a `caller` filter is added; the per-proposal query is unchanged **[Migration: 0025_documents_listing_indexes.sql]** (#189).
+- **Connection budget docs**: `docs/DEPLOYMENT.md` states where SSE clients fit (one listener connection per instance, bounded by `STREAM_MAX_CONNECTIONS`), the pre-#152 deadlock condition, and a worked example with streams (#188).
 - **Named Cache-Control policies**: `public-live`, `public-historical`, `private`, `no-store` in `src/api/cache-policy.ts`; unset routes default to `no-store`, authenticated requests are never shared-cacheable, and a test fails on an ad-hoc directive (#194). `/admin/failed-events` and the SSE stream now send `no-store`.
 - **Migration reversibility policy**: forward-only, backward-compatible with the previous release; every migration carries a `-- compat:` annotation enforced by test, existing migrations audited, and a rollback procedure added to `docs/DEPLOYMENT.md` (#197).
 - **Pool tuning**: `DB_IDLE_TIMEOUT_MS`, `DB_APPLICATION_NAME`, per-process `application_name` (`ourdao-api`, `ourdao-worker`, `ourdao-reindex`); reindex and migrations lift `statement_timeout` for themselves only (#196).
@@ -26,6 +30,7 @@ Entries that affect deployment or runtime state are annotated:
 
 
 ### Fixed
+- **Duplicate migration version 22**: `0022_auth_nonces_rekey.sql` renumbered `0024` and annotated breaking; it no longer fails with `relation "auth_nonces_expires_at_idx" already exists` on a database that predates it **[Migration: 0024_auth_nonces_rekey.sql]**. Swagger/OpenAPI registration restored in `buildServer`.
 - **`withLoanDerived`** no longer throws on a malformed amount: the row's `interest_charge`/`repaid_amount` are `null` instead of a `500` for the whole list; a test asserts every `NUMERIC` column keeps scale zero (#195).
 - **Duplicate migration version 21**: `0021_quarantine_state.sql` renumbered `0023` **[Migration: 0023_quarantine_state.sql]**. `schema.sql` now includes `quarantine_state` and the 0022 `failed_events` uniqueness, and the quarantine-state upsert no longer references an invalid column.
 

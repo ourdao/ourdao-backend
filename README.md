@@ -329,6 +329,8 @@ Postgres failures are mapped to a sensible status rather than an opaque `500`, a
 
 Codes are **append-only** (`ERROR_CODES` in [`src/api/errors.ts`](src/api/errors.ts)): a code is never renamed, removed or repurposed, only added. Unknown codes should be treated by clients like the generic code for their status.
 
+> `/ready`'s `503` is a probe status (`{ status, reason, … }`), not an error, and keeps that shape.
+
 > `429` responses from the rate limiter (`@fastify/rate-limit`) keep that plugin's own fields (`statusCode`, `error`, `message`) and additionally carry `code` and `correlationId`.
 
 ### Caching

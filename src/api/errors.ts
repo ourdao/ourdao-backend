@@ -241,5 +241,6 @@ export function frameworkErrors(err: FastifyError, req: FastifyRequest, reply: F
   const status = err.statusCode ?? 400
   reply
     .code(status)
+    .header('x-correlation-id', req.id)
     .send({ error: STATUS_CODES[status] ?? 'Bad Request', code: codeForStatus(status), correlationId: req.id } satisfies ErrorEnvelope)
 }

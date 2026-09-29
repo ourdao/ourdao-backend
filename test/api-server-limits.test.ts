@@ -63,13 +63,16 @@ describe('server limits (#187)', () => {
         socket.write('GET /api/members HTTP/1.1\r\nHost: localhost\r\n')
       })
       let data = ''
-      socket.on('data', (chunk) => (data += chunk.toString()))
-      socket.on('close', () => resolve(data))
-      socket.on('error', reject)
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         socket.destroy()
         reject(new Error('stalled request was never closed'))
       }, 5_000)
+      socket.on('data', (chunk) => (data += chunk.toString()))
+      socket.on('close', () => {
+        clearTimeout(timer)
+        resolve(data)
+      })
+      socket.on('error', reject)
     })
 
     expect(Date.now() - started).toBeLessThan(5_000)
