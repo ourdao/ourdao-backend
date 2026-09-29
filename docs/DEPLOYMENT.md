@@ -244,6 +244,26 @@ Both the API and the worker maintain a pool of Postgres connections. They connec
 - **Telling processes apart**: each process sets `application_name` — `ourdao-api`, `ourdao-worker`, `ourdao-api-listener` (the SSE listener), and `ourdao-reindex` while a rebuild runs — so `SELECT application_name, count(*) FROM pg_stat_activity GROUP BY 1` shows who holds what. Set `DB_APPLICATION_NAME` only if you need a custom name and give the API and worker different values.
 - **Total connections**: `worker_pool + (api_instances × (DB_POOL_MAX + 1))` must fit within Postgres's `max_connections` (the `+ 1` per instance is its stream listener). The default is 100; budget accordingly, or use a connection pooler (PgBouncer, RDS Proxy) if you scale API instances beyond a handful.
 
+### Where SSE clients fit in the budget
+
+Open `/api/stream` clients do **not** appear in the connection formula above, and that is deliberate — not an omission:
+
+- **Per instance, streams cost exactly one Postgres connection in total** (the shared `ourdao-api-listener` session), whether one tab or `STREAM_MAX_CONNECTIONS` tabs are connected. They never check out a connection from the `DB_POOL_MAX` request pool, so no number of concurrent streams can starve ordinary queries.
+- **The hard per-instance limit on streams is `STREAM_MAX_CONNECTIONS`** (default 100; `STREAM_MAX_CONNECTIONS_PER_IP`, default 10, per client IP). Past it a new stream gets `503 SERVICE_UNAVAILABLE` with `Retry-After`. What streams consume is sockets/file descriptors and a little memory each — size the host's `ulimit -n` and your load balancer's connection limits for it, not `max_connections`.
+- **Historical deadlock, for anyone reading older guidance** (issue #188): before issue #152 every stream held a dedicated connection *from the request pool* for its whole lifetime, so the real budget was `worker_pool + (api_instances × (DB_POOL_MAX + concurrent_streams))` — except that streams drew from the same pool rather than adding to it. With the default pool of 10, ten concurrent tabs on one instance took every connection, and that instance's ordinary queries then waited for a free connection forever. If you run a release that predates #152, keep concurrent streams per instance strictly below `DB_POOL_MAX`, or the instance deadlocks.
+
+Worked example, including streams: 3 API instances with `DB_POOL_MAX=10` and `STREAM_MAX_CONNECTIONS=100`, plus a worker pool of 5, at peak with every instance holding 100 open streams:
+
+| | Postgres connections | Sockets |
+|---|---|---|
+| Worker | 5 | — |
+| Request pools | 3 × 10 = 30 | — |
+| Stream listeners | 3 × 1 = 3 | — |
+| SSE clients | 0 | 3 × 100 = 300 |
+| **Total** | **38** of `max_connections` | 300 open streams (plus ordinary request sockets) |
+
+Doubling `STREAM_MAX_CONNECTIONS` to 200 leaves the Postgres column at 38 and doubles only the socket column.
+
 ### Multi-instance API state and PgBouncer
 
 Each API instance has its own `/api/stats` cache, nonce memory store (when
