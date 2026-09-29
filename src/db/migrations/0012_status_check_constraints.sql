@@ -1,3 +1,4 @@
+-- compat: breaking (adds CHECK constraints: a previous release that writes a status outside the set is now rejected, and rolling back cannot remove them)
 -- #73 — the loan_proposals / loans / treasury_proposals `status` columns were
 -- bare TEXT with no CHECK. A typo in a handler (`'Repaid'`, `'defaulted '`)
 -- would persist silently and then quietly under-report through

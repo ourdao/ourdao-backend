@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- #168 — a reindex re-applies every raw event, so a previously-quarantined
 -- event that folds cleanly this time is repaired, but failed_events was
 -- never updated to say so: /api/stats.quarantinedEvents kept counting it

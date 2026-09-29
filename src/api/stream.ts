@@ -3,6 +3,7 @@ import type { Client, PoolClient } from 'pg'
 import { config } from '../config.js'
 import { createDedicatedClient, pool } from '../db/index.js'
 import { logger } from '../logger.js'
+import { setCachePolicy } from './cache-policy.js'
 
 /**
  * Server-Sent Events stream for real-time updates (issue #63).
@@ -341,7 +342,7 @@ export class StreamClient {
     lastEventId?: string
   ): Promise<void> {
     this.reply.header('Content-Type', 'text/event-stream')
-    this.reply.header('Cache-Control', 'no-cache')
+    setCachePolicy(this.reply, 'no-store')
     this.reply.header('Connection', 'keep-alive')
     this.reply.header('X-Accel-Buffering', 'no') // Disable nginx buffering
 

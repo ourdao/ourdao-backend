@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- Track a distinct-voter headcount alongside the stake-weighted tally, so a
 -- client can show both "7 members voted" and "carrying 19 voting power"
 -- (see the Event catalog section of the README).

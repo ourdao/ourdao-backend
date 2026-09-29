@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- Issue #172: Move quarantine failure counter to persistent storage so a crash
 -- loop still escalates to quarantine. Previous state lived only in memory — a
 -- restart reset the counter, letting a deterministic failure that had failed

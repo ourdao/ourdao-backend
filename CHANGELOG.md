@@ -15,11 +15,19 @@ Entries that affect deployment or runtime state are annotated:
 ## [Unreleased]
 
 ### Added
+- **Named Cache-Control policies**: `public-live`, `public-historical`, `private`, `no-store` in `src/api/cache-policy.ts`; unset routes default to `no-store`, authenticated requests are never shared-cacheable, and a test fails on an ad-hoc directive (#194). `/admin/failed-events` and the SSE stream now send `no-store`.
+- **Migration reversibility policy**: forward-only, backward-compatible with the previous release; every migration carries a `-- compat:` annotation enforced by test, existing migrations audited, and a rollback procedure added to `docs/DEPLOYMENT.md` (#197).
+- **Pool tuning**: `DB_IDLE_TIMEOUT_MS`, `DB_APPLICATION_NAME`, per-process `application_name` (`ourdao-api`, `ourdao-worker`, `ourdao-reindex`); reindex and migrations lift `statement_timeout` for themselves only (#196).
 - **Image Vulnerability Scanning**: Added Trivy container image vulnerability scanning to CI `docker-build` job with failure policy on HIGH/CRITICAL and allowlist support via `.trivyignore` (#212).
 - **Base Image Digest Pinning**: Pinned Docker base image to `node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293` with automated Dependabot updates (#212).
 - **Mutation Testing**: Evaluated and configured Stryker for high-risk modules `src/indexer/handlers.ts` and `src/api/errors.ts` (#209).
 - **Soroban RPC Response Shape Smoke Test**: Added opt-in scheduled smoke test verifying real RPC wire response compatibility without mocking, pinned to SDK version 16.0.1 (#206).
 - **Changelog & Versioning**: Established `CHANGELOG.md`, versioning policy, and deployment tracking (#213).
+
+
+### Fixed
+- **`withLoanDerived`** no longer throws on a malformed amount: the row's `interest_charge`/`repaid_amount` are `null` instead of a `500` for the whole list; a test asserts every `NUMERIC` column keeps scale zero (#195).
+- **Duplicate migration version 21**: `0021_quarantine_state.sql` renumbered `0023` **[Migration: 0023_quarantine_state.sql]**. `schema.sql` now includes `quarantine_state` and the 0022 `failed_events` uniqueness, and the quarantine-state upsert no longer references an invalid column.
 
 ---
 

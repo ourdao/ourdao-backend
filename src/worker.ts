@@ -1,3 +1,4 @@
+import './worker-role.js'
 import { migrate } from './db/migrate.js'
 import { pool } from './db/index.js'
 import { runIndexer, stopIndexer } from './indexer/poller.js'

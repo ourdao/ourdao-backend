@@ -25,7 +25,9 @@ import type {
 } from '../../types.js'
 import { authenticateRequest, classifyStellarAddress, NonceStoreCapacityError, type NonceStore } from '../../auth.js'
 import { getConnectedStreamCount, getNotificationFailureCount, registerStreamEndpoint } from '../stream.js'
+import { historicalOrLive, setCachePolicy } from '../cache-policy.js'
 import { ConcurrencyGate } from '../load-shedding.js'
+import { withLoanDerived } from '../loan-derived.js'
 
 function parseLimit(v: unknown, def = 50, max = 200): number | null {
   if (v === undefined || v === null || v === '') return def
@@ -131,22 +133,6 @@ async function entityTimeline(symbols: readonly string[], id: string): Promise<T
   return rows.map(toTimelineEntry)
 }
 
-// A loan's interest charge and repayment progress aren't stored columns —
-// both derive from total_repayment, which issue #11 added — so compute them
-// at read time rather than duplicating state that could drift out of sync.
-// BigInt (not Number) because these are NUMERIC(40,0) decimal strings that
-// can exceed Number.MAX_SAFE_INTEGER.
-function withLoanDerived(loan: LoanRow): LoanRow & { interest_charge: string; repaid_amount: string } {
-  const totalRepayment = BigInt(loan.total_repayment)
-  const amount = BigInt(loan.amount)
-  const outstanding = BigInt(loan.outstanding)
-  return {
-    ...loan,
-    interest_charge: (totalRepayment - amount).toString(),
-    repaid_amount: (totalRepayment - outstanding).toString(),
-  }
-}
-
 export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: NonceStore }): Promise<void> {
   const { nonceStore } = opts
 
@@ -195,7 +181,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // only ever appeared in a `name_reg`/`staked` event and never actually
   // joined the DAO (issue #14). A real member always has a join ledger.
   app.get('/members', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     const q = req.query as Record<string, unknown>
     if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
@@ -208,7 +194,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   })
 
   app.get<{ Params: { address: string } }>('/members/:address', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     if (!validAddress(req.params.address)) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
@@ -218,7 +204,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   })
 
   app.get<{ Params: { address: string } }>('/members/:address/summary', async (req, reply) => {
-    reply.header('Cache-Control', 'private, no-cache')
+    setCachePolicy(reply, 'private')
     if (!validAddress(req.params.address)) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
@@ -301,7 +287,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
 
     const result = summary.summary
     if (result.loans && Array.isArray(result.loans)) {
-      result.loans = result.loans.map(withLoanDerived)
+      result.loans = result.loans.map((l) => withLoanDerived(l, req.log))
     }
 
     return result
@@ -316,7 +302,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // e.g. a treasury `destination` doesn't show up here. `?before=<ledger>`
   // cursor, like the other historical feeds.
   app.get<{ Params: { address: string } }>('/members/:address/activity', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     if (!validAddress(req.params.address)) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
@@ -342,7 +328,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
 
   // --- Loan proposals ---
   app.get('/proposals/loan', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     const q = req.query as Record<string, unknown>
     if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
@@ -356,7 +342,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
 
   // --- Loans (optional ?borrower= filter, ?before=<id> cursor) ---
   app.get('/loans', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     const q = req.query as Record<string, unknown>
     if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
@@ -382,18 +368,18 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
     params.push(l)
     const loans = await query<LoanRow>(`SELECT * FROM loans ${where} ORDER BY id DESC LIMIT $${params.length}`, params)
-    return loans.map(withLoanDerived)
+    return loans.map((l) => withLoanDerived(l, req.log))
   })
 
   app.get<{ Params: { id: string } }>('/loans/:id', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     const rawId = req.params.id.trim()
     if (!/^[0-9]+$/.test(rawId) || !Number.isSafeInteger(Number(rawId)) || Number(rawId) <= 0) {
       return reply.code(400).send({ error: 'invalid loan id' })
     }
     const loan = await queryOne<LoanRow>('SELECT * FROM loans WHERE id = $1', [Number(rawId)])
     if (!loan) return reply.code(404).send({ error: 'loan not found' })
-    return withLoanDerived(loan)
+    return withLoanDerived(loan, req.log)
   })
 
   // --- A loan's full event history (issue #26) ---
@@ -407,7 +393,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // (200), not a 404 — the loan may simply have no events yet, and the caller
   // asked "what happened to this id", which is legitimately "nothing".
   app.get<{ Params: { id: string } }>('/loans/:id/timeline', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     const id = entityIdParam(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid loan id' })
     return { timeline: await entityTimeline(LOAN_TIMELINE_SYMBOLS, id) }
@@ -415,7 +401,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
 
   // --- Treasury proposals ---
   app.get('/proposals/treasury', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     const q = req.query as Record<string, unknown>
     if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
@@ -431,7 +417,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // independent sequences and collide, so this is a distinct route rather
   // than a shared `/proposals/:id/timeline`. Same empty-not-404 contract.
   app.get<{ Params: { id: string } }>('/proposals/treasury/:id/timeline', async (req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
+    setCachePolicy(reply, 'public-live')
     const id = entityIdParam(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid proposal id' })
     return { timeline: await entityTimeline(TREASURY_TIMELINE_SYMBOLS, id) }
@@ -439,7 +425,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
 
   // --- Notifications for an address ---
   app.get('/notifications', async (req, reply) => {
-    reply.header('Cache-Control', 'private, no-cache')
+    setCachePolicy(reply, 'private')
     const q = req.query as Record<string, unknown>
     if (typeof q.address !== 'string' || !q.address || !validAddress(q.address)) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
@@ -474,11 +460,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     
     const order = typeof q.order === 'string' && q.order === 'asc' ? 'ASC' : 'DESC'
 
-    if (before !== null || after !== null) {
-      reply.header('Cache-Control', 'public, max-age=31536000, immutable')
-    } else {
-      reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
-    }
+    setCachePolicy(reply, historicalOrLive(before !== null || after !== null))
 
     const symbol = typeof q.symbol === 'string' && q.symbol ? q.symbol : null
     const contract = typeof q.contract === 'string' && q.contract ? q.contract : null
@@ -597,11 +579,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
     
-    if (before !== null) {
-      reply.header('Cache-Control', 'public, max-age=31536000, immutable')
-    } else {
-      reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
-    }
+    setCachePolicy(reply, historicalOrLive(before !== null))
     // `?contract=<C...>` scopes to one deployment, same as /events (issue #16).
     const contract = typeof q.contract === 'string' && q.contract ? q.contract : null
     const params: unknown[] = [ADMIN_EVENT_SYMBOLS as unknown as string[]]
@@ -630,11 +608,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
     
-    if (before !== null) {
-      reply.header('Cache-Control', 'public, max-age=31536000, immutable')
-    } else {
-      reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
-    }
+    setCachePolicy(reply, historicalOrLive(before !== null))
     
     const params: unknown[] = []
     let where = ''
@@ -665,11 +639,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
     
-    if (before !== null) {
-      reply.header('Cache-Control', 'public, max-age=31536000, immutable')
-    } else {
-      reply.header('Cache-Control', 'public, max-age=5, must-revalidate')
-    }
+    setCachePolicy(reply, historicalOrLive(before !== null))
     
     const kind = q.kind
     if (kind !== 'loan' && kind !== 'treasury') {
@@ -854,7 +824,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
 
   app.get('/stats', async (_req, reply): Promise<DAOStats | { error: string }> => {
     const ttl = config.http.statsCacheMs
-    reply.header('Cache-Control', `public, max-age=${Math.max(0, Math.floor(ttl / 1000))}`)
+    setCachePolicy(reply, 'public-live')
     // Issue #156: connectedStreams is live process state — always refresh it
     // even when the rest of the stats payload is served from the short cache.
     const liveStreams = getConnectedStreamCount()

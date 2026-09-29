@@ -163,7 +163,7 @@ async function saveCursor(
     cursorWriteFailures = { error: msg, at: Date.now() }
     // Re-throw: the poll loop needs to know folding didn't complete
     // (the fold itself succeeded, but its progress wasn't recorded).
-    throw new Error(`Cursor write failed: ${msg}`)
+    throw new Error(`Cursor write failed: ${msg}`, { cause: err })
   }
 }
 
@@ -325,7 +325,8 @@ async function recordQuarantinedEvent(ev: DecodedEvent, error: unknown): Promise
     )
   } catch (insertErr) {
     throw new Error(
-      `Failed to record quarantined event ${ev.id} in failed_events: ${insertErr instanceof Error ? insertErr.message : String(insertErr)}`
+      `Failed to record quarantined event ${ev.id} in failed_events: ${insertErr instanceof Error ? insertErr.message : String(insertErr)}`,
+      { cause: insertErr }
     )
   }
   console.error(`[indexer] quarantined event ${ev.id} (${ev.symbol}) at ledger ${ev.ledger}: ${message}`)
@@ -485,7 +486,7 @@ async function persistQuarantineState(state: QuarantineState | null, escalating 
     } else {
       await pool.query(
         `INSERT INTO quarantine_state (id, page_key, error_message, failures, escalated_at, updated_at)
-         VALUES (1, $1, $2, $3, ${escalating ? 'now()' : 'escalated_at'}, now())
+         VALUES (1, $1, $2, $3, ${escalating ? 'now()' : 'NULL'}, now())
          ON CONFLICT (id) DO UPDATE SET page_key = $1, error_message = $2, failures = $3, escalated_at = COALESCE(EXCLUDED.escalated_at, quarantine_state.escalated_at), updated_at = now()`,
         [state.pageKey, state.errorMessage, state.failures]
       )

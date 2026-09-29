@@ -7,6 +7,7 @@ import swagger from '@fastify/swagger'
 import swaggerUi from '@fastify/swagger-ui'
 import { config } from '../config.js'
 import { pool } from '../db/index.js'
+import { registerCachePolicy } from './cache-policy.js'
 import { registerErrorHandling } from './errors.js'
 import { registerRoutes } from './routes/index.js'
 import { MemoryNonceStore, PostgresNonceStore, type NonceStore } from '../auth.js'
@@ -119,6 +120,8 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
   } as const)
 
   await app.register(etag)
+  // Registered after etag so its onSend sees the final headers (issue #194).
+  registerCachePolicy(app)
 
   // ── CORS ──
   const origins = config.http.corsOrigin

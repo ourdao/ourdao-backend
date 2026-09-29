@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- #44: doc_attn was in the event catalog but had no handler, so there was no
 -- way to list a proposal's attached documents' existence/history off-chain.
 -- One row per event; the content hash itself is never stored here (still

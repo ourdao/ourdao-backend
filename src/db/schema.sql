@@ -227,9 +227,38 @@ CREATE TABLE IF NOT EXISTS failed_events (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolved_at TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS failed_events_event_id_idx ON failed_events (event_id);
+-- One row per distinct failing event (migration 0022, issue #171).
+DO $$ BEGIN
+  ALTER TABLE failed_events ADD CONSTRAINT failed_events_event_id_unique UNIQUE (event_id);
+EXCEPTION WHEN duplicate_table OR duplicate_object THEN NULL;
+END $$;
 CREATE INDEX IF NOT EXISTS failed_events_unresolved_idx ON failed_events (id) WHERE resolved_at IS NULL;
-CREATE INDEX IF NOT EXISTS failed_events_ledger_idx ON failed_events (ledger);
+CREATE INDEX IF NOT EXISTS failed_events_ledger_created_at_idx ON failed_events (ledger, created_at);
+
+CREATE OR REPLACE FUNCTION delete_expired_failed_events() RETURNS void AS $$
+BEGIN
+  DELETE FROM failed_events
+  WHERE created_at < now() - INTERVAL '1 day' * COALESCE(
+    current_setting('app.failed_events_retention_days', true)::int,
+    30
+  );
+END;
+$$ LANGUAGE plpgsql;
+
+-- Persistent quarantine escalation state (issues #172, #174); see
+-- migrations/0023_quarantine_state.sql. Singleton row, not derived: never
+-- truncated by npm run reindex.
+CREATE TABLE IF NOT EXISTS quarantine_state (
+  id        SMALLINT PRIMARY KEY DEFAULT 1,
+  page_key  TEXT,
+  error_message TEXT,
+  failures  INT NOT NULL DEFAULT 1,
+  escalated_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT single_row CHECK (id = 1)
+);
+CREATE INDEX IF NOT EXISTS quarantine_state_escalated_at_idx ON quarantine_state (escalated_at);
 
 -- One row per `doc_attn` event (issue #44): the existence and history of a
 -- proposal's attached documents, not the content hash itself (that's read

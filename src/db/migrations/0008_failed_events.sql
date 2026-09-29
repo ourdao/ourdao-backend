@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- #43: a deterministically-throwing handler used to wedge the indexer
 -- permanently (same page retried forever behind exponential backoff, capped
 -- at 60s). The poller now quarantines an event after N consecutive

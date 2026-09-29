@@ -109,7 +109,7 @@ describe('API: GET /api/admin/failed-events (issue #43)', () => {
 
   it('does not cache the response publicly', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/admin/failed-events' })
-    expect(res.headers['cache-control']).toBeUndefined()
+    expect(res.headers['cache-control']).toBe('no-store')
   })
 
   it('paginates with a before cursor on id', async () => {

@@ -82,6 +82,10 @@ export async function migrate(): Promise<void> {
   const client = await pool.connect()
   try {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY])
+    // Issue #196: a migration (an ALTER over a large table) may legitimately
+    // outlast the pool's default statement_timeout. Lift it for this session
+    // only; restored in the finally below before the client returns to the pool.
+    await client.query('SET statement_timeout = 0')
     try {
       const schemaSql = await readFile(join(here, 'schema.sql'), 'utf8')
       await client.query(schemaSql)
@@ -128,6 +132,7 @@ export async function migrate(): Promise<void> {
         }
       }
     } finally {
+      await client.query('RESET statement_timeout')
       await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY])
     }
   } finally {

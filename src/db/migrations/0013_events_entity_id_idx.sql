@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- Issue #26: per-loan / per-proposal / per-member event timelines.
 --
 -- The timeline endpoints filter the append-only `events` log by the entity id

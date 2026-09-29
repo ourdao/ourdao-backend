@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- Issue #119: the quarantine path inserted the raw event row (autocommitting
 -- on its own) and then folded it in a *separate* transaction, so `isNew`
 -- (whether insertRawEvent's own INSERT reported a fresh row) was overloaded

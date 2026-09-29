@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg'
-import { pool } from '../db/index.js'
+import { exemptTransactionFromStatementTimeout, pool } from '../db/index.js'
 import { applyEvent } from './handlers.js'
 import { namedFields, type DecodedEvent } from '../stellar/events.js'
 import { DERIVED_TABLES, resetDaoTotals } from './derived-tables.js'
@@ -70,6 +70,10 @@ export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ e
     lockAcquired = true
 
     await client.query('BEGIN')
+    // Issue #196: the pool applies a default statement_timeout; a rebuild of
+    // the whole event log is expected to run far longer. Exempt this
+    // transaction only (SET LOCAL reverts at COMMIT/ROLLBACK).
+    await exemptTransactionFromStatementTimeout(client, 'ourdao-reindex')
     // Issue #52: preserve user-authored notification read states across rebuilds
     const { rows: savedReads } = await client.query<{ event_id: string; address: string }>(
       `SELECT event_id, address FROM notifications WHERE read = true AND event_id IS NOT NULL`

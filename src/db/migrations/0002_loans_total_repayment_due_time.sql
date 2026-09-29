@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- Add the total owed and due date to disbursed loans. `total_repayment` is
 -- already tracked on the originating loan_proposals row (set at loan_req /
 -- loan_edit time); loans didn't carry it forward. `due_time` has no source

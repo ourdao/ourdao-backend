@@ -53,7 +53,8 @@ export interface MemberSummary {
   // via GET /api/loans?borrower=<address>. The aggregate counts in
   // `position` below are computed over ALL of the member's loans regardless
   // of this cap, never just the embedded page.
-  loans: (LoanRow & { interest_charge: string; repaid_amount: string })[]
+  // Derived fields are null for a loan with a malformed amount column (issue #195).
+  loans: (LoanRow & { interest_charge: string | null; repaid_amount: string | null })[]
   loans_total_count: number
   loans_truncated: boolean
   unread_notifications: number

@@ -75,7 +75,7 @@ describe('API: /api/stream', () => {
     const streamPromise = app.inject({ method: 'GET', url: '/api/stream' }).then((res) => {
       expect(res.statusCode).toBe(200)
       expect(res.headers['content-type']).toContain('text/event-stream')
-      expect(res.headers['cache-control']).toBe('no-cache')
+      expect(res.headers['cache-control']).toBe('no-store')
       expect(res.headers['connection']).toBe('keep-alive')
     })
 

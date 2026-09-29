@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- #45: `last_ledger` was carrying two different meanings — "highest ledger
 -- actually folded" (what the reorg continuity check needs) and "how current
 -- is the RPC's chain tip" (what freshness reporting wants). An empty page

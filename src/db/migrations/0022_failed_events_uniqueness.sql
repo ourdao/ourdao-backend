@@ -1,3 +1,4 @@
+-- compat: breaking (adds UNIQUE(event_id) to failed_events: the previous release inserts without ON CONFLICT and errors on a repeat failure)
 -- Issue #171: failed_events had no uniqueness and no retention. The table
 -- grew without bound because event_id wasn't unique — every failure inserted
 -- a new row carrying the full exception message. One broken handler could

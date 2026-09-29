@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- #52 — preserve notification read state across reindex by linking notifications
 -- to their source event_id and recipient address.
 

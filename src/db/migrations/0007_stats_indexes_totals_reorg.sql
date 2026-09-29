@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- Bundles the schema changes for three related issues so an existing
 -- database gets them in one step. Fresh databases get the same end state
 -- from schema.sql directly.

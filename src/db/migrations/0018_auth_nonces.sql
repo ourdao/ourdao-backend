@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- Migration: Add auth_nonces table for shared nonce storage across API instances (issue #66)
 -- This table stores short-lived nonces used in the authentication challenge-response flow.
 -- Nonces are consumed atomically via DELETE ... WHERE ... AND expires_at > now() RETURNING *

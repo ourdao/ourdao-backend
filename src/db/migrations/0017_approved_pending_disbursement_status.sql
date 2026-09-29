@@ -1,3 +1,4 @@
+-- compat: breaking (widens the status CHECK: rows may hold approved_pending_disbursement, a status the previous release does not handle)
 -- #125 — `loan_wait`/`tre_wait` (added to the EVENT_FIELDS catalog alongside
 -- this migration) mark a proposal that reached quorum but couldn't be
 -- disbursed yet because the treasury was too small. The contract leaves it

@@ -56,6 +56,12 @@ export const pool = new Pool({
   // successfully established (a stuck lock, a database mid-failover) is
   // killed by Postgres rather than left running indefinitely.
   statement_timeout: config.db.statementTimeoutMs,
+  // Issue #196: evict idle connections after a configurable time rather than
+  // relying on pg's implicit 30s.
+  idleTimeoutMillis: config.db.idleTimeoutMs,
+  // Issue #196: distinguishes this process's connections (api / worker) in
+  // pg_stat_activity.
+  application_name: config.db.applicationName,
 })
 
 pool.on('error', (err) => {
@@ -77,7 +83,20 @@ export function createDedicatedClient(): Client {
   return new Client({
     ...(connectionString ? { connectionString } : {}),
     types: { getTypeParser: scopedGetTypeParser },
+    application_name: `${config.db.applicationName}-listener`,
   })
+}
+
+/**
+ * Issue #196: lift `statement_timeout` for the current transaction only, for
+ * the deliberately long-running paths (reindex) that the pool-wide default
+ * would otherwise kill. Must be called inside a `BEGIN` — `SET LOCAL` reverts
+ * automatically at COMMIT/ROLLBACK, so the connection returns to the pool
+ * with the normal limit.
+ */
+export async function exemptTransactionFromStatementTimeout(client: PoolClient, applicationName?: string): Promise<void> {
+  await client.query('SET LOCAL statement_timeout = 0')
+  if (applicationName) await client.query(`SELECT set_config('application_name', $1, true)`, [applicationName])
 }
 
 export async function query<T extends QueryResultRow = QueryResultRow>(
