@@ -83,8 +83,24 @@ function invalidEventCursor(v: unknown): boolean {
   return v !== undefined && eventCursor(v) === null
 }
 
-function validAddress(address: string): boolean {
-  return StrKey.isValidEd25519PublicKey(address)
+/**
+ * Validate a Stellar address and return its canonical form, or null (#263).
+ *
+ * StrKey base32 is canonically uppercase, so `isValidEd25519PublicKey` rejects
+ * a lowercase or mixed-case spelling even though it names the same account.
+ * Callers used to pass the raw param straight to Postgres, so a client that
+ * spelled an address the way it appears in a wallet URL — or the way `toString`
+ * lowercases it — got a 400 or, worse, a silently empty list, because the
+ * stored row is uppercase. Normalising here means every address comparison in
+ * this file is case-insensitive without each route having to remember.
+ *
+ * Returns the uppercase form only after validation, so an invalid address is
+ * still rejected before it reaches a query.
+ */
+function canonicalAddress(address: unknown): string | null {
+  if (typeof address !== 'string' || address.length === 0) return null
+  const upper = address.toUpperCase()
+  return StrKey.isValidEd25519PublicKey(upper) ? upper : null
 }
 
 // Validate a positive integer path param (loan / proposal id). Returns the
@@ -195,17 +211,19 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
 
   app.get<{ Params: { address: string } }>('/members/:address', async (req, reply) => {
     setCachePolicy(reply, 'public-live')
-    if (!validAddress(req.params.address)) {
+    const address = canonicalAddress(req.params.address)
+    if (!address) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
-    const m = await queryOne<MemberRow>('SELECT * FROM members WHERE address = $1', [req.params.address])
+    const m = await queryOne<MemberRow>('SELECT * FROM members WHERE address = $1', [address])
     if (!m) return reply.code(404).send({ error: 'member not found' })
     return m
   })
 
   app.get<{ Params: { address: string } }>('/members/:address/summary', async (req, reply) => {
     setCachePolicy(reply, 'private')
-    if (!validAddress(req.params.address)) {
+    const address = canonicalAddress(req.params.address)
+    if (!address) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
 
@@ -281,7 +299,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
           )
         ) as summary
       FROM m
-    `, [req.params.address])
+    `, [address])
 
     if (!summary || !summary.summary) return reply.code(404).send({ error: 'member not found' })
 
@@ -303,7 +321,8 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // cursor, like the other historical feeds.
   app.get<{ Params: { address: string } }>('/members/:address/activity', async (req, reply) => {
     setCachePolicy(reply, 'public-live')
-    if (!validAddress(req.params.address)) {
+    const address = canonicalAddress(req.params.address)
+    if (!address) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
     const q = req.query as Record<string, unknown>
@@ -312,7 +331,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
 
-    const params: unknown[] = [MEMBER_ACTIVITY_SYMBOLS as unknown as string[], req.params.address]
+    const params: unknown[] = [MEMBER_ACTIVITY_SYMBOLS as unknown as string[], address]
     let where = `WHERE symbol = ANY($1) AND data @> to_jsonb($2::text)`
     if (before !== null) {
       params.push(before)
@@ -348,12 +367,13 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     const l = limit(q.limit)
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
+    let borrower: string | null = null
     if (q.borrower !== undefined && q.borrower !== null && q.borrower !== '') {
-      if (typeof q.borrower !== 'string' || !validAddress(q.borrower)) {
+      borrower = canonicalAddress(q.borrower)
+      if (!borrower) {
         return reply.code(400).send({ error: 'invalid Stellar address' })
       }
     }
-    const borrower = typeof q.borrower === 'string' && q.borrower ? q.borrower : null
 
     const conditions: string[] = []
     const params: unknown[] = []
@@ -427,14 +447,15 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get('/notifications', async (req, reply) => {
     setCachePolicy(reply, 'private')
     const q = req.query as Record<string, unknown>
-    if (typeof q.address !== 'string' || !q.address || !validAddress(q.address)) {
+    const address = canonicalAddress(q.address)
+    if (!address) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
     if (invalidLimit(q.limit)) return reply.code(400).send({ error: 'invalid limit parameter' })
     const l = limit(q.limit)
     return query<NotificationRow>(
       'SELECT * FROM notifications WHERE address = $1 ORDER BY id DESC LIMIT $2',
-      [q.address, l]
+      [address, l]
     )
   })
 
@@ -552,19 +573,20 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // --- Mark all of an address's notifications as read ---
   app.patch('/notifications/read-all', async (req, reply) => {
     const q = req.query as Record<string, unknown>
-    if (typeof q.address !== 'string' || !q.address || !validAddress(q.address)) {
+    const address = canonicalAddress(q.address)
+    if (!address) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
-    
+
     // Authenticate the request and verify the address matches
-    const auth = await authenticateRequest(req.headers, nonceStore, q.address, req.log)
+    const auth = await authenticateRequest(req.headers, nonceStore, address, req.log)
     if (!auth.authenticated) {
       return reply.code(auth.status).send({ error: auth.error || 'Authentication required' })
     }
-    
+
     const rows = await query<NotificationRow>(
       'UPDATE notifications SET read = true WHERE address = $1 AND read = false RETURNING id',
-      [q.address]
+      [address]
     )
     return { updated: rows.length }
   })
@@ -664,11 +686,15 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       params.push(Number(q.proposal_id))
       conditions.push(`proposal_id = $${params.length}`)
     }
+    let caller: string | null = null
     if (q.caller !== undefined) {
-      if (typeof q.caller !== 'string' || !validAddress(q.caller)) {
+      caller = canonicalAddress(q.caller)
+      if (!caller) {
         return reply.code(400).send({ error: 'invalid Stellar address' })
       }
-      params.push(q.caller)
+    }
+    if (caller) {
+      params.push(caller)
       conditions.push(`caller = $${params.length}`)
     }
     if (before !== null) {
