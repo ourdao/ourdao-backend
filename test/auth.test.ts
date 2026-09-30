@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Account, Keypair, MuxedAccount, StrKey } from '@stellar/stellar-sdk'
 import {
   authenticateRequest,
+  authStats,
   classifyStellarAddress,
   extractAuthHeaders,
   isValidStellarAddress,
@@ -87,7 +88,13 @@ describe('verifySignature (issue #71)', () => {
 })
 
 describe('authenticateRequest (issue #70)', () => {
-  function headersFor(address: string, nonce = 'nonce1'): Record<string, unknown> {
+  // Issue #266: a real nonce is 32 random bytes in hex (see
+  // PostgresNonceStore.issue), and authenticateRequest rejects anything else
+  // before touching the store. Tests that exercise the *post*-signature paths
+  // therefore need a well-formed nonce; 'nonce1' no longer reaches them.
+  const WELL_FORMED_NONCE = 'a'.repeat(64)
+
+  function headersFor(address: string, nonce = WELL_FORMED_NONCE): Record<string, unknown> {
     return { authorization: `StellarSignature ${address}:${sign(nonce, address)}:${nonce}` }
   }
 
@@ -286,7 +293,7 @@ describe('authenticateRequest — characterization (#72)', () => {
       await authenticateRequest(headersFor(G, 'n'), { issue: async () => 'n', consume: async () => false, shutdown: async () => {} }),
     ).toMatchObject({ error: 'Invalid or expired nonce' })
     expect(
-      await authenticateRequest({ authorization: `StellarSignature ${G}:bm90LXNpZw:n` }, alwaysValidNonce),
+      await authenticateRequest({ authorization: `StellarSignature ${G}:bm90LXNpZw:${'a'.repeat(64)}` }, alwaysValidNonce),
     ).toMatchObject({ error: 'Invalid signature' })
 
     const store = new MemoryNonceStore()
@@ -381,12 +388,82 @@ describe('structured logging, not console (issues #132, #133)', () => {
   it('authenticateRequest threads its logger through to verifySignature', async () => {
     const { logger, warnCalls } = fakeLogger()
     const res = await authenticateRequest(
-      { authorization: `StellarSignature ${G}:bm90LXNpZw:n` },
+      { authorization: `StellarSignature ${G}:bm90LXNpZw:${'a'.repeat(64)}` },
       { issue: async () => 'n', consume: async () => true, shutdown: async () => {} },
       undefined,
       logger,
     )
     expect(res).toMatchObject({ authenticated: false, error: 'Invalid signature' })
     expect(warnCalls).toHaveLength(1)
+  })
+})
+
+describe('malformed-nonce rejection happens before the store (issue #266)', () => {
+  // A store that counts how often it was queried, so the test can assert the
+  // store was *not* reached rather than merely that the request failed.
+  function countingStore() {
+    let consumeCalls = 0
+    const store: NonceStore = {
+      issue: async () => 'a'.repeat(64),
+      consume: async () => {
+        consumeCalls++
+        return true
+      },
+      shutdown: async () => {},
+    }
+    return { store, consumeCalls: () => consumeCalls }
+  }
+
+  const WELL_FORMED = 'b'.repeat(64)
+
+  function headersFor(address: string, nonce: string): Record<string, unknown> {
+    return { authorization: `StellarSignature ${address}:${sign(nonce, address)}:${nonce}` }
+  }
+
+  it('rejects a nonce of the wrong shape without querying the store', async () => {
+    const { store, consumeCalls } = countingStore()
+
+    // A correctly signed request whose nonce cannot have been issued: the
+    // signature is valid, so only the shape gate can reject it.
+    const res = await authenticateRequest(headersFor(G, 'not-a-real-nonce'), store)
+
+    expect(res).toMatchObject({
+      authenticated: false,
+      status: 401,
+      error: 'Invalid or expired nonce',
+    })
+    expect(consumeCalls()).toBe(0)
+  })
+
+  it.each([
+    ['too short', 'abc'],
+    ['too long', 'a'.repeat(65)],
+    ['uppercase hex', 'A'.repeat(64)],
+    ['non-hex characters', 'z'.repeat(64)],
+    ['empty', ''],
+  ])('rejects a %s nonce without querying the store', async (_label, nonce) => {
+    const { store, consumeCalls } = countingStore()
+    const res = await authenticateRequest(headersFor(G, nonce), store)
+
+    expect(res).toMatchObject({ authenticated: false, status: 401 })
+    expect(consumeCalls()).toBe(0)
+  })
+
+  it('does reach the store for a well-formed nonce', async () => {
+    // The control: the gate must not reject valid input.
+    const { store, consumeCalls } = countingStore()
+    const res = await authenticateRequest(headersFor(G, WELL_FORMED), store)
+
+    expect(consumeCalls()).toBe(1)
+    expect(res).toEqual({ authenticated: true, address: G })
+  })
+
+  it('counts a malformed nonce as invalidNonce in authStats', async () => {
+    const { store } = countingStore()
+    const before = authStats.verificationsFailed.invalidNonce
+
+    await authenticateRequest(headersFor(G, 'bad'), store)
+
+    expect(authStats.verificationsFailed.invalidNonce).toBe(before + 1)
   })
 })

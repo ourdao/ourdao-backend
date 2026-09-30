@@ -128,6 +128,33 @@ export interface NonceStore {
   shutdown(): Promise<void>
 }
 
+/**
+ * Issue #266: a nonce is 32 random bytes in hex — it carries no timestamp, so
+ * its age cannot be read from the string. The expiry bound lives in the store
+ * entry instead (memory) or in `auth_nonces.expires_at` (Postgres), and this
+ * is the window the issue asks callers to enforce before touching the
+ * database.
+ */
+export const NONCE_MAX_AGE_MS = 300_000
+
+/**
+ * Cheap structural pre-check on a nonce, run before any store access.
+ *
+ * A nonce the server issues is 32 random bytes in hex (see `issue()`), so
+ * anything that is not 64 hex characters cannot be in the store and can be
+ * rejected without a query. This is the in-memory gate issue #266 asks for:
+ * during a replay flood the store — and, with the Postgres implementation, the
+ * database — is never reached for input of the wrong shape.
+ *
+ * Deliberately *not* an expiry check: a nonce is random bytes with no
+ * embedded timestamp, so its age cannot be read from the string. Expiry is
+ * enforced by the store (`expires_at` / `expiresAt`), which is the only place
+ * that knows when a nonce was issued. See `NONCE_MAX_AGE_MS`.
+ */
+export function isWellFormedNonce(nonce: string): boolean {
+  return typeof nonce === 'string' && /^[0-9a-f]{64}$/.test(nonce)
+}
+
 // A member's address is their on-chain identity — logging it in full on every
 // request links identity to request timing (issue #133). Truncate the way a
 // block explorer does (first 4 / last 4 chars) so debug output stays useful
@@ -498,6 +525,24 @@ export async function authenticateRequest(
   if (!sig.ok) {
     failureTracker?.recordFailure(address)
     return { authenticated: false, status: sig.status, error: sig.error }
+  }
+
+  // Issue #266: reject a nonce that cannot have been issued by this server
+  // before the store is touched. During a replay flood the store — and, with
+  // the Postgres implementation, the database — is never queried for input
+  // that is not even the right shape. This runs *after* signature
+  // verification so a malformed nonce is still attributed to a bad signature
+  // first, preserving the existing status codes.
+  //
+  // A nonce's *age* is not encoded in the string (it is 32 random bytes), so
+  // an expiry check cannot happen here; the store enforces it, and
+  // NONCE_MAX_AGE_MS documents the window. Rejecting on shape alone is what
+  // is achievable in memory.
+  if (!isWellFormedNonce(nonce)) {
+    logger?.warn(`[auth] authentication failed: reason=malformed_nonce address=${truncateAddress(address)}`)
+    authStats.verificationsFailed.invalidNonce++
+    failureTracker?.recordFailure(address)
+    return { authenticated: false, status: 401, error: 'Invalid or expired nonce' }
   }
 
   // Only now consume the nonce, so a bad signature never spends it.
