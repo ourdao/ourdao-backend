@@ -5,6 +5,7 @@ import compress from '@fastify/compress'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import etag from '@fastify/etag'
+import helmet from '@fastify/helmet'
 import swagger from '@fastify/swagger'
 import swaggerUi from '@fastify/swagger-ui'
 import { config } from '../config.js'
@@ -111,6 +112,54 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
   // One error shape for every failure — installed before routes so every child
   // context inherits it (issue #81).
   registerErrorHandling(app)
+
+  // ── Security headers (issue #298) ──
+  // Registered first, at the root scope, so every response — API routes, the
+  // probes, the Prometheus scrape, the error envelope and the Swagger UI —
+  // carries the same hardening headers, and a route added later cannot
+  // silently opt out of them.
+  //
+  // The CSP is spelled out (`useDefaults: false`) instead of inheriting
+  // Helmet's defaults because two of those defaults are wrong for this
+  // service: `style-src https:` / `font-src https:` allow any origin for a
+  // process that serves only same-origin assets, and
+  // `upgrade-insecure-requests` would rewrite the Swagger UI's own
+  // same-origin asset URLs to `https://localhost` whenever the API is reached
+  // over plain HTTP (local development), breaking `/docs` instead of
+  // protecting anything. `style-src 'unsafe-inline'` stays because Swagger UI
+  // injects its own inline styles; scripts are same-origin files only.
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        'default-src': ["'self'"],
+        'base-uri': ["'self'"],
+        'script-src': ["'self'"],
+        'script-src-attr': ["'none'"],
+        'style-src': ["'self'", "'unsafe-inline'"],
+        'img-src': ["'self'", 'data:'],
+        'font-src': ["'self'", 'data:'],
+        'object-src': ["'none'"],
+        // Clickjacking: the API may never be framed. `frame-ancestors` covers
+        // CSP level 2 browsers; `frameguard` below covers the older ones.
+        'frame-ancestors': ["'none'"],
+        'form-action': ["'self'"],
+      },
+    },
+    // One year, subdomains included. Browsers only honour HSTS on an HTTPS
+    // response, so this is inert on a plain-HTTP deployment and takes effect
+    // once the service is reached through TLS.
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: false,
+    },
+    // X-Frame-Options: DENY, the pre-CSP-2 half of the pair above.
+    frameguard: { action: 'deny' },
+    // X-Content-Type-Options: nosniff is on by default in Helmet — it is what
+    // keeps a browser from sniffing a JSON body as script — and
+    // test/api-security-headers.test.ts pins it.
+  })
 
   // A failed package.json read is reported once at startup, rather than
   // silently returning 'unknown' from every future /version call — a
