@@ -16,6 +16,39 @@ export class ConcurrencyGate {
   }
 
   release(): void {
-    this.active -= 1
+    if (this.active > 0) {
+      this.active -= 1
+    }
+  }
+
+  get activeCount(): number {
+    return this.active
+  }
+
+  get capacity(): number {
+    return this.limit
+  }
+
+  /**
+   * Executes an asynchronous task inside the gate, guaranteeing that capacity
+   * is released in a finally block regardless of whether `fn` resolves,
+   * rejects asynchronously, or throws synchronously.
+   */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.tryAcquire()) {
+      throw new ConcurrencyLimitError('Concurrency limit reached')
+    }
+    try {
+      return await fn()
+    } finally {
+      this.release()
+    }
+  }
+}
+
+export class ConcurrencyLimitError extends Error {
+  constructor(message = 'Concurrency limit reached') {
+    super(message)
+    this.name = 'ConcurrencyLimitError'
   }
 }

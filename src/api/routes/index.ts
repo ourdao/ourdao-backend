@@ -28,7 +28,7 @@ import type {
 import { authenticateRequest, classifyStellarAddress, NonceStoreCapacityError, type NonceStore } from '../../auth.js'
 import { getConnectedStreamCount, getNotificationFailureCount, registerStreamEndpoint } from '../stream.js'
 import { historicalOrLive, setCachePolicy } from '../cache-policy.js'
-import { ConcurrencyGate } from '../load-shedding.js'
+import { ConcurrencyGate, ConcurrencyLimitError } from '../load-shedding.js'
 import { withLoanDerived } from '../loan-derived.js'
 import { getOrSetCache, membersListCacheKey, memberSummaryCacheKey } from '../../cache/redis.js'
 import { replayFailedEvent } from '../../indexer/replay.js'
@@ -1331,26 +1331,29 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     // allowed to be shed. A cache miss never waits behind another expensive
     // recomputation: preserving ordinary reads is more useful than making a
     // dashboard poll queue until the request pool is exhausted.
-    if (!statsGate.tryAcquire()) {
-      reply.header('Retry-After', String(config.http.statsRetryAfterSeconds))
-      return reply.code(503).send({ error: 'stats temporarily unavailable; retry shortly' })
-    }
-
     try {
-      const value = await computeStats()
-      statsCache = { at: Date.now(), value }
-      return { ...value, connectedStreams: liveStreams }
+      return await statsGate.run(async () => {
+        try {
+          const value = await computeStats()
+          statsCache = { at: Date.now(), value }
+          return { ...value, connectedStreams: liveStreams }
+        } catch (err) {
+          // A successful prior value remains useful during a transient database
+          // failure. Surface that it is stale while retaining the normal shape.
+          if (statsCache) {
+            app.log.warn({ err }, 'stats recompute failed; serving stale cached value')
+            reply.header('X-Data-Stale', 'true')
+            return { ...statsCache.value, connectedStreams: liveStreams }
+          }
+          throw err
+        }
+      })
     } catch (err) {
-      // A successful prior value remains useful during a transient database
-      // failure. Surface that it is stale while retaining the normal shape.
-      if (statsCache) {
-        app.log.warn({ err }, 'stats recompute failed; serving stale cached value')
-        reply.header('X-Data-Stale', 'true')
-        return { ...statsCache.value, connectedStreams: liveStreams }
+      if (err instanceof ConcurrencyLimitError) {
+        reply.header('Retry-After', String(config.http.statsRetryAfterSeconds))
+        return reply.code(503).send({ error: 'stats temporarily unavailable; retry shortly' })
       }
       throw err
-    } finally {
-      statsGate.release()
     }
   })
 
