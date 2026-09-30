@@ -4,6 +4,12 @@ import { config } from '../config.js'
 import { createDedicatedClient, pool } from '../db/index.js'
 import { logger } from '../logger.js'
 import { setCachePolicy } from './cache-policy.js'
+import {
+  sseActiveConnections,
+  sseDisconnectsTotal,
+  sseMessagesBroadcastTotal,
+  type DisconnectReason,
+} from './stream-metrics.js'
 
 /**
  * Server-Sent Events stream for real-time updates (issue #63).
@@ -112,6 +118,43 @@ export function getConnectedStreamCount(): number {
 export function resetConnectedStreamsForTests(): void {
   connectedClients.clear()
   connectionsByIp.clear()
+  sseActiveConnections.set(0)
+}
+
+/**
+ * Add a client to the process-wide trackers, and to the gauge that mirrors
+ * them (issue #274). Kept in one place so the count, the per-IP map and the
+ * metric can never disagree.
+ */
+function trackClient(client: StreamClient, ip: string): void {
+  connectedClients.add(client)
+  connectionsByIp.set(ip, (connectionsByIp.get(ip) ?? 0) + 1)
+  sseActiveConnections.inc()
+}
+
+/**
+ * Remove a client from the trackers. Returns `true` when the client was
+ * actually tracked, so the caller can skip the metric updates on the
+ * idempotent second close() (issue #159) — otherwise the disconnect total
+ * would inflate and the gauge would drift below zero.
+ */
+function untrackClient(client: StreamClient, ip: string): boolean {
+  if (!connectedClients.delete(client)) return false
+  const n = connectionsByIp.get(ip) ?? 0
+  if (n <= 1) connectionsByIp.delete(ip)
+  else connectionsByIp.set(ip, n - 1)
+  return true
+}
+
+/**
+ * Test helper: register a client the way the endpoint does.
+ *
+ * `StreamClient` only reaches the trackers through `registerStreamEndpoint`,
+ * which needs a live HTTP connection; tests that assert on the disconnect
+ * path need the same bookkeeping without a socket.
+ */
+export function trackStreamClientForTests(client: StreamClient, ip = 'test'): void {
+  trackClient(client, ip)
 }
 
 /**
@@ -310,7 +353,9 @@ export class StreamClient {
   // stop writing until 'drain'. `paused` tracks that; frames sent while
   // paused go to `queue` instead of straight to the socket.
   private paused = false
-  private queue: string[] = []
+  // Issue #274: each entry carries its channel so a frame written later by
+  // flushQueue is attributed to the right metric label.
+  private queue: Array<{ frame: string; channel: string }> = []
   private stallTimer: NodeJS.Timeout | null = null
   // Issue #155: the highest ledger sequence this client has been shown,
   // seeded from the process-wide `knownLedger` at connect time. Used as the
@@ -318,10 +363,19 @@ export class StreamClient {
   // sequence, not `Date.now()`), rather than distinct per message.
   private lastSentLedger = 0
   readonly ip: string
+  // Issue #274: why this connection ended, for the disconnect counter. Set by
+  // whichever path calls close() first; a plain client disconnect is the
+  // default because that is the common case.
+  private disconnectReason: DisconnectReason = 'client_closed'
 
   constructor(reply: FastifyReply, ip = 'unknown') {
     this.reply = reply
     this.ip = ip
+  }
+
+  /** Issue #274: label the next close() so the metric can attribute it. */
+  private markDisconnect(reason: DisconnectReason): void {
+    if (!this.closed) this.disconnectReason = reason
   }
 
   /**
@@ -352,6 +406,9 @@ export class StreamClient {
     // (dead link, slept laptop) is dropped.
     const idleMs = streamLimits.idleTimeoutMs
     this.reply.raw.setTimeout(idleMs, () => {
+      // Issue #274: a socket idle timeout is a different failure from a
+      // client that closed cleanly, and the disconnect counter separates them.
+      this.markDisconnect('idle_timeout')
       void this.close().catch((err) => {
         console.error('[stream] close error after socket idle timeout:', err)
       })
@@ -456,15 +513,19 @@ export class StreamClient {
     const frame = `event: ${eventType}\nid: ${id}\ndata: ${data}\n\n`
 
     if (this.paused) {
-      this.enqueue(frame)
+      this.enqueue(frame, msg.channel ?? 'unknown')
       return
     }
-    this.writeFrame(frame)
+    this.writeFrame(frame, msg.channel ?? 'unknown')
   }
 
-  private writeFrame(frame: string): void {
+  private writeFrame(frame: string, channel: string): void {
     try {
       const ok = this.reply.raw.write(frame)
+      // Issue #274: count frames that actually reached the socket. Counting
+      // at enqueue time would report a message as delivered while it is still
+      // sitting in the backpressure queue.
+      sseMessagesBroadcastTotal.inc({ channel })
       if (!ok) {
         this.paused = true
         this.armStallTimer()
@@ -477,7 +538,7 @@ export class StreamClient {
     }
   }
 
-  private enqueue(frame: string): void {
+  private enqueue(frame: string, channel: string): void {
     if (this.queue.length >= MAX_QUEUED_MESSAGES) {
       // Already over the bound: a consumer that cannot keep up is better
       // dropped than buffered forever (issue #157).
@@ -486,13 +547,15 @@ export class StreamClient {
       })
       return
     }
-    this.queue.push(frame)
+    // Issue #274: the channel travels with the frame, so a frame written
+    // later by flushQueue is still attributed to the right channel.
+    this.queue.push({ frame, channel })
   }
 
   private flushQueue(): void {
     while (!this.paused && !this.closed && this.queue.length > 0) {
-      const frame = this.queue.shift()
-      if (frame !== undefined) this.writeFrame(frame)
+      const queued = this.queue.shift()
+      if (queued !== undefined) this.writeFrame(queued.frame, queued.channel)
     }
   }
 
@@ -501,6 +564,8 @@ export class StreamClient {
     this.stallTimer = setTimeout(() => {
       // Backpressured for too long with no drain: a stalled reader is
       // better dropped than buffered forever (issue #157).
+      // Issue #274: label it so a spike in stalled readers is visible.
+      this.markDisconnect('drain_stall')
       void this.close().catch((err) => {
         console.error('[stream] close error after drain stall:', err)
       })
@@ -539,10 +604,12 @@ export class StreamClient {
     this.channels.clear()
 
     // Drop from the process-wide trackers (issue #156).
-    if (connectedClients.delete(this)) {
-      const n = connectionsByIp.get(this.ip) ?? 0
-      if (n <= 1) connectionsByIp.delete(this.ip)
-      else connectionsByIp.set(this.ip, n - 1)
+    if (untrackClient(this, this.ip)) {
+      // Issue #274: only count a close that actually removed a tracked
+      // client — close() is idempotent, and counting every call would
+      // inflate the total and drive the gauge negative.
+      sseActiveConnections.dec()
+      sseDisconnectsTotal.inc({ reason: this.disconnectReason })
     }
 
     // End the response
@@ -630,8 +697,7 @@ export async function registerStreamEndpoint(app: FastifyInstance): Promise<void
       await sharedListener.ensureStarted()
 
       streamClient = new StreamClient(reply, ip)
-      connectedClients.add(streamClient)
-      connectionsByIp.set(ip, ipCount + 1)
+      trackClient(streamClient, ip)
 
       // Issue #159: register handlers only after streamClient is assigned, as
       // synchronous wrappers that attach .catch() — EventEmitter ignores the

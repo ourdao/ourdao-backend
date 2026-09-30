@@ -11,6 +11,7 @@ import { pool } from '../db/index.js'
 import { registerCachePolicy } from './cache-policy.js'
 import { clientErrorHandler, frameworkErrors, registerErrorHandling } from './errors.js'
 import { registerRoutes } from './routes/index.js'
+import { renderStreamMetrics } from './stream-metrics.js'
 import { MemoryNonceStore, PostgresNonceStore, type NonceStore } from '../auth.js'
 import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
@@ -181,6 +182,16 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     commit: process.env.SOURCE_COMMIT ?? 'unknown',
     buildDate: process.env.BUILD_DATE ?? 'unknown',
   }))
+
+  // ── Prometheus metrics (issue #274) ──
+  // Scraped by an operator, not a user, so it returns the text exposition
+  // format and nothing else. Kept out of the rate limiter's allow-list on
+  // purpose: a scrape is a normal request and should not be able to flood.
+  app.get('/metrics', async (_req, reply) => {
+    return reply
+      .header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
+      .send(await renderStreamMetrics())
+  })
 
   // ── Readiness probe (issue #2) — checks DB + indexer freshness ──
   app.get('/ready', async (_req, reply) => {
