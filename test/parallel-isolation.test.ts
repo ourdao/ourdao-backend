@@ -33,28 +33,27 @@ describe('Parallel test isolation (#204)', () => {
 
   it('tables exist in the worker schema and are empty after resetDb', async () => {
     // Verify tables exist and are empty (resetDb truncates them)
-    const { rows: eventCount } = await pool.query<{ count: string }>(
+    const { rows: eventCount } = await pool.query<{ count: number }>(
       'SELECT COUNT(*) as count FROM events'
     )
-    expect(eventCount[0]?.count).toBe('0')
+    expect(eventCount[0]?.count).toBe(0)
 
-    const { rows: memberCount } = await pool.query<{ count: string }>(
+    const { rows: memberCount } = await pool.query<{ count: number }>(
       'SELECT COUNT(*) as count FROM members'
     )
-    expect(memberCount[0]?.count).toBe('0')
+    expect(memberCount[0]?.count).toBe(0)
   })
 
   it('data inserted in one test does not leak to another', async () => {
     // Insert a row
     await pool.query(
-      `INSERT INTO members (member_id, address, created_at, updated_at, proposal_count, vote_count, loan_proposal_count, default_count)
-       VALUES ('test-member-1', 'GTEST', NOW(), NOW(), 0, 0, 0, 0)`
+      `INSERT INTO members (address, joined_ledger) VALUES ('GTEST', 1)`
     )
 
-    const { rows } = await pool.query<{ count: string }>(
+    const { rows } = await pool.query<{ count: number }>(
       'SELECT COUNT(*) as count FROM members'
     )
-    expect(rows[0]?.count).toBe('1')
+    expect(rows[0]?.count).toBe(1)
 
     // The next test that runs (even in parallel) won't see this row because
     // it's in a different schema or resetDb() will truncate it
@@ -64,15 +63,14 @@ describe('Parallel test isolation (#204)', () => {
     // This test runs concurrently with others. If schemas weren't isolated,
     // one worker's TRUNCATE would race another's SELECT and cause flakiness.
     await pool.query(
-      `INSERT INTO members (member_id, address, created_at, updated_at, proposal_count, vote_count, loan_proposal_count, default_count)
-       VALUES ('test-member-2', 'GTEST2', NOW(), NOW(), 0, 0, 0, 0)`
+      `INSERT INTO members (address, joined_ledger) VALUES ('GTEST2', 1)`
     )
 
     await pool.query('TRUNCATE members CASCADE')
 
-    const { rows } = await pool.query<{ count: string }>(
+    const { rows } = await pool.query<{ count: number }>(
       'SELECT COUNT(*) as count FROM members'
     )
-    expect(rows[0]?.count).toBe('0')
+    expect(rows[0]?.count).toBe(0)
   })
 })

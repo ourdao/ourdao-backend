@@ -105,7 +105,7 @@ describe('API graceful shutdown (#207)', () => {
 
     // Timeout should have fired first
     expect(timedOut).toBe(true)
-  }, { timeout: 10000 })
+  }, 10000)
 
   it('resources are closed in the correct order', async () => {
     const closureOrder: string[] = []

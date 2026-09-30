@@ -10,7 +10,6 @@ import { DERIVED_TABLES, resetDaoTotals } from './derived-tables.js'
 import { REINDEX_LOCK_KEY } from './reindex.js'
 import { notifyStreamClientsAfterCommit, STREAM_CHANNELS, type StreamChannel } from '../api/stream.js'
 import { invalidateCache, invalidateMembersListCache, memberSummaryCacheKey } from '../cache/redis.js'
-import { notifyStreamClientsAfterCommit, type StreamChannel } from '../api/stream.js'
 import { getTracer } from '../telemetry.js'
 
 interface CursorRow {
@@ -42,6 +41,64 @@ export class ReorgDetectedError extends Error {
   }
 }
 
+/** Thrown by `runIndexer` when a recorded discontinuity has not been cleared
+ *  (issue #191): the worker refuses to start rather than fold past diverged
+ *  history on an automatic restart. */
+export class ReorgHaltedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ReorgHaltedError'
+  }
+}
+
+/** One recorded ledger discontinuity (issue #191). */
+export interface ReorgHalt {
+  id: number
+  contract_id: string
+  last_ledger: number | null
+  last_ledger_hash: string | null
+  detail: string
+  detected_at: string
+  cleared_at: string | null
+  cleared_by: string | null
+}
+
+/** Persist a detected discontinuity before the worker exits, so the halt is
+ *  visible over the API after the process (and its logs) are gone. Best
+ *  effort: a failure to record must not mask the halt itself, so it is logged
+ *  and swallowed — the worker still exits non-zero either way. */
+export async function recordReorgHalt(contractId: string, err: ReorgDetectedError): Promise<void> {
+  try {
+    const cursor = await loadCursor(contractId)
+    await query(
+      `INSERT INTO reorg_halts (contract_id, last_ledger, last_ledger_hash, detail)
+       VALUES ($1, $2, $3, $4)`,
+      [contractId, cursor?.last_ledger ?? null, cursor?.last_ledger_hash ?? null, err.message]
+    )
+  } catch (recordErr) {
+    console.error('[indexer] failed to record the ledger discontinuity:', recordErr)
+  }
+}
+
+/** The most recent discontinuity no operator has cleared, or null. */
+export async function loadUnclearedReorgHalt(): Promise<ReorgHalt | null> {
+  return queryOne<ReorgHalt>(
+    `SELECT id, contract_id, last_ledger, last_ledger_hash, detail, detected_at, cleared_at, cleared_by
+       FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1`
+  )
+}
+
+/** Mark every uncleared discontinuity as cleared by `clearedBy` (`reindex`
+ *  when a rebuild completed, or the operator acknowledging a false alarm via
+ *  `npm run reorg:clear`). Returns how many rows were cleared. */
+export async function clearReorgHalts(clearedBy: string): Promise<number> {
+  const rows = await query<{ id: number }>(
+    `UPDATE reorg_halts SET cleared_at = now(), cleared_by = $1 WHERE cleared_at IS NULL RETURNING id`,
+    [clearedBy]
+  )
+  return rows.length
+}
+
 /** Wipe the cursor and every derived table so the indexer can re-index a new
  *  deployment from an empty slate. Destructive — only reached when
  *  INDEXER_RESET_ON_CONTRACT_CHANGE is set. */
@@ -55,7 +112,7 @@ export async function resetForContractChange(): Promise<void> {
     // or ROLLBACK — no explicit unlock is needed, preventing leaks on crash.
     await client.query('BEGIN')
     const lockRes = await client.query<{ pg_try_advisory_xact_lock: boolean }>(
-      'SELECT pg_try_advisory_xact_lock($1)',
+      'SELECT pg_try_advisory_xact_lock($1, hashtext(current_schema()))',
       [REINDEX_LOCK_KEY]
     )
     if (!lockRes.rows[0]?.pg_try_advisory_xact_lock) {
@@ -262,7 +319,7 @@ async function ingestPage(events: rpc.Api.EventResponse[], lastLedger: number): 
   const pendingNotifications: { channel: StreamChannel; ev: DecodedEvent }[] = []
   try {
     const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1)',
+      'SELECT pg_try_advisory_lock($1, hashtext(current_schema()))',
       [REINDEX_LOCK_KEY]
     )
     if (!lockRes.rows[0]?.pg_try_advisory_lock) {
@@ -310,7 +367,7 @@ async function ingestPage(events: rpc.Api.EventResponse[], lastLedger: number): 
   } finally {
     if (lockAcquired) {
       try {
-        await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+        await client.query('SELECT pg_advisory_unlock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
       } catch (err) {
         console.error('[indexer] failed to release advisory lock:', err)
       }
@@ -421,7 +478,7 @@ async function ingestEventQuarantined(ev: DecodedEvent, lastLedger: number): Pro
   let committedChannel: StreamChannel | undefined
   try {
     const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1)',
+      'SELECT pg_try_advisory_lock($1, hashtext(current_schema()))',
       [REINDEX_LOCK_KEY]
     )
     if (!lockRes.rows[0]?.pg_try_advisory_lock) {
@@ -447,7 +504,7 @@ async function ingestEventQuarantined(ev: DecodedEvent, lastLedger: number): Pro
   } finally {
     if (lockAcquired) {
       try {
-        await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+        await client.query('SELECT pg_advisory_unlock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
       } catch (err) {
         console.error('[indexer] failed to release advisory lock:', err)
       }
@@ -785,8 +842,20 @@ export async function runIndexer(): Promise<void> {
   if (running) {
     throw new Error('Indexer is already running — cannot start a second instance')
   }
-  running = true
-  abortController = new AbortController()
+  // Issue #191: a recorded discontinuity means history diverged from what
+  // was folded and the previous run halted on purpose. Resuming would fold
+  // events from the diverged history, so refuse until an operator has run
+  // `npm run reindex` (which clears it) or `npm run reorg:clear`.
+  const halt = await loadUnclearedReorgHalt()
+  if (halt) {
+    const message =
+      `a ledger discontinuity recorded at ${new Date(halt.detected_at).toISOString()} on ${halt.contract_id} ` +
+      `(last folded ledger ${halt.last_ledger ?? 'unknown'}) has not been cleared: ${halt.detail}. ` +
+      'Confirm the chain state, then run `npm run reindex` (rebuilds and clears) or ' +
+      '`npm run reorg:clear` for a false alarm. See docs/REORG_RECOVERY.md.'
+    console.error(`[indexer] REFUSING TO RESUME — ${message}`)
+    throw new ReorgHaltedError(message)
+  }
 
   // Issue #289: one indexer process can now tail several contracts at once.
   // Each gets its own cursor row (see the migration + loadCursor/saveCursor
@@ -797,6 +866,12 @@ export async function runIndexer(): Promise<void> {
   const contractIds = assertContractsConfigured()
   await ensureCursorContract(contractIds)
   console.log(`[indexer] watching ${contractIds.length} contract(s) on ${config.stellar.rpcUrl}: ${contractIds.join(', ')}`)
+
+  // Latch only once every start-up check has passed, so a failed start
+  // (no contract configured, cursor table unavailable) never leaves the
+  // process believing an indexer is still running.
+  running = true
+  abortController = new AbortController()
 
   const consecutiveFailures = new Map<string, number>()
   const nextPollAt = new Map<string, number>(contractIds.map((id) => [id, 0]))
@@ -827,6 +902,9 @@ export async function runIndexer(): Promise<void> {
               `[indexer] Recovery: confirm the true chain state, then run \`npm run reindex\` to rebuild ` +
                 `the derived tables from the raw events log. See README "Reorg detection".`
             )
+            // Issue #191: persist the halt before exiting so it outlives the
+            // process and its logs, and so the next start refuses to resume.
+            await recordReorgHalt(contractId, err)
             // Reorg halt is deliberate and permanent for this run — don't
             // reset, so the caller must explicitly restart (issue #48).
             throw err

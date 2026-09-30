@@ -47,7 +47,7 @@ const CASES: Case[] = [
  *  normalises `status IN ('a','b')` to `status = ANY (ARRAY['a'::text, …])`. */
 async function constraintValues(name: string): Promise<string[]> {
   const { rows } = await pool.query<{ def: string }>(
-    `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1`,
+    `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1 AND connamespace = current_schema()::regnamespace`,
     [name],
   )
   expect(rows, `constraint ${name} must exist`).toHaveLength(1)

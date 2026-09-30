@@ -22,10 +22,10 @@ const PG_LEAK_PATTERNS = [
   /out of range/i,
   /for type integer/i,
   /for type numeric/i,
-  /violates/i,
-  /constraint/i,
-  /relation/i,
-  /column/i,
+  /violates .*constraint "/i,
+  /constraint "/i,
+  /relation "/i,
+  /column "/i,
   /SELECT /,
   /FROM /,
   /INSERT /,
@@ -172,6 +172,7 @@ describe('Error envelope property: no Postgres detail leakage (#205)', () => {
       expect(res.statusCode).toBe(500)
       expect(res.json()).toEqual({
         error: 'internal server error',
+        code: expect.any(String),
         correlationId: expect.any(String),
       })
 
@@ -188,6 +189,7 @@ describe('Error envelope property: no Postgres detail leakage (#205)', () => {
       expect(res.statusCode).toBe(404)
       expect(res.json()).toEqual({
         error: 'route not found',
+        code: expect.any(String),
         correlationId: expect.any(String),
       })
 

@@ -58,7 +58,7 @@ describe('indexer: reindex advisory locking', () => {
   it('refuses a concurrent reindex with ReindexLockError when the advisory lock is already held', async () => {
     // Acquire the advisory lock manually on a dedicated client session
     const lockAcquired = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1)',
+      'SELECT pg_try_advisory_lock($1, hashtext(current_schema()))',
       [REINDEX_LOCK_KEY]
     )
     expect(lockAcquired.rows[0]?.pg_try_advisory_lock).toBe(true)
@@ -67,7 +67,7 @@ describe('indexer: reindex advisory locking', () => {
     await expect(reindexFromEventLog()).rejects.toThrow(ReindexLockError)
 
     // Unlock on the holding client
-    await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+    await client.query('SELECT pg_advisory_unlock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
 
     // Now reindex proceeds normally
     const res = await reindexFromEventLog()
@@ -99,13 +99,13 @@ describe('indexer: reindex advisory locking', () => {
     } as unknown as import('@stellar/stellar-sdk').rpc.Api.GetEventsResponse)
 
     // Hold the advisory lock
-    await client.query('SELECT pg_advisory_lock($1)', [REINDEX_LOCK_KEY])
+    await client.query('SELECT pg_advisory_lock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
 
     // Indexer fetchOnce attempting ingestPage must fail
     await expect(fetchOnce('CTESTCONTRACT')).rejects.toThrow(/reindex is currently in progress/)
 
     // Release lock
-    await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+    await client.query('SELECT pg_advisory_unlock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
 
     // Verify raw events log does not have the un-folded event
     const events = await query<{ id: string }>('SELECT id FROM events WHERE id = $1', ['200-0'])
@@ -113,11 +113,11 @@ describe('indexer: reindex advisory locking', () => {
   })
 
   it('refuses resetForContractChange while advisory lock is held', async () => {
-    await client.query('SELECT pg_advisory_lock($1)', [REINDEX_LOCK_KEY])
+    await client.query('SELECT pg_advisory_lock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
 
     await expect(resetForContractChange()).rejects.toThrow(/advisory lock held/)
 
-    await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+    await client.query('SELECT pg_advisory_unlock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
 
     await expect(resetForContractChange()).resolves.toBeUndefined()
   })
@@ -134,10 +134,10 @@ describe('indexer: reindex advisory locking', () => {
 
     // The lock must have been released, so another connection can acquire it immediately
     const lockCheck = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1)',
+      'SELECT pg_try_advisory_lock($1, hashtext(current_schema()))',
       [REINDEX_LOCK_KEY]
     )
     expect(lockCheck.rows[0]?.pg_try_advisory_lock).toBe(true)
-    await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+    await client.query('SELECT pg_advisory_unlock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
   })
 })

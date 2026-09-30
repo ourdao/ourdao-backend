@@ -34,7 +34,7 @@ export function createHistoryCache(): {
       client.on('error', (error) => console.warn('[history-cache] Redis error:', error.message))
     }
     if (!client.isOpen) {
-      connecting ??= client.connect().finally(() => { connecting = null })
+      connecting ??= client.connect().then(() => undefined).finally(() => { connecting = null })
       await connecting
     }
     return client

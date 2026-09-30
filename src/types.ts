@@ -274,4 +274,17 @@ export interface DAOStats {
   // Count of failed stream NOTIFYs since process start (issue #169).
   // In-process only, same caveat as connectedStreams above.
   notificationFailures: number
+  // Issue #191: a ledger discontinuity the worker halted on and no operator
+  // has cleared yet. Distinct from `indexerStale`: the worker stopped on
+  // purpose, and restarting it will not help — see docs/REORG_RECOVERY.md.
+  reorgDetected: boolean
+  reorgHalt: ReorgHaltSummary | null
+}
+
+/** The uncleared discontinuity surfaced by `/ready` and `/api/stats` (issue #191). */
+export interface ReorgHaltSummary {
+  detectedAt: string
+  contractId: string
+  lastLedger: number | null
+  detail: string
 }

@@ -76,7 +76,56 @@
     },
     "/api/members/{address}/activity": {
       "get": {
+        "summary": "A member's cross-entity activity feed",
+        "tags": [
+          "Members"
+        ],
         "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max rows to return (1-200, default 50)."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "description": "Pagination cursor: return rows from ledgers strictly below this value."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "joined",
+                "exited",
+                "claimed",
+                "staked",
+                "unstaked",
+                "name_reg",
+                "loan_req",
+                "loan_edit",
+                "loan_vote",
+                "loan_appr",
+                "loan_rpy",
+                "loan_dflt",
+                "loan_exp",
+                "tre_vote",
+                "committed",
+                "revealed"
+              ]
+            },
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "description": "Narrow the feed to one activity kind (issue #193). Must be one of the member-activity symbols; anything else is a 400."
+          },
           {
             "schema": {
               "type": "string"
@@ -225,9 +274,100 @@
     },
     "/api/admin/log": {
       "get": {
+        "summary": "Admin/governance audit log",
+        "tags": [
+          "admin"
+        ],
+        "description": "Raw events for admin/governance-lifecycle symbols only (init, admin add/remove, threshold, policy, pause/unpause) — a public audit trail read straight off the chain. Optionally scoped to one contract deployment.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max rows to return (1-200, default 50)."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "description": "Pagination cursor: return rows with a strictly smaller ledger than this value."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "contract",
+            "required": false,
+            "description": "Restrict to one contract deployment id."
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Default Response"
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "ledger": {
+                        "type": "integer"
+                      },
+                      "closed_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "contract_id": {
+                        "type": "string"
+                      },
+                      "symbol": {
+                        "type": "string"
+                      },
+                      "topics": {},
+                      "data": {},
+                      "tx_hash": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "decode_error": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -251,6 +391,164 @@
       }
     },
     "/api/admin/failed-events": {
+      "get": {
+        "summary": "Quarantined (deterministically-failed) events",
+        "tags": [
+          "admin"
+        ],
+        "description": "Events whose fold handler threw deterministically and were isolated rather than retried forever (issue #43) — the operator-facing view of the quarantine. Never includes the raw exception text; that is logged, not returned, so this endpoint stays safe to leave unauthenticated.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max rows to return (1-200, default 50)."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "description": "Pagination cursor: return rows with a strictly smaller id than this value."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "in": "query",
+            "name": "unresolved",
+            "required": false,
+            "description": "When \"true\", only rows a reindex/replay has not yet resolved."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "description": "Only failures of events with this symbol (issue #192)."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "from_ledger",
+            "required": false,
+            "description": "Only failures from this ledger onwards (issue #192)."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "query",
+            "name": "to_ledger",
+            "required": false,
+            "description": "Only failures up to and including this ledger (issue #192). With from_ledger, the range may span at most 10000 ledgers."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "headers": {
+              "x-total-count": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Rows matching every filter except the before cursor: the size of the whole quarantine, however far the page is (issue #192)."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "integer"
+                      },
+                      "event_id": {
+                        "type": "string"
+                      },
+                      "symbol": {
+                        "type": "string"
+                      },
+                      "ledger": {
+                        "type": "integer"
+                      },
+                      "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "resolved_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/failed-events/{id}/re-evaluate": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/admin/failed-events/batch-resolve": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/admin/audit-log": {
       "get": {
         "responses": {
           "200": {
@@ -337,7 +635,25 @@
         }
       }
     },
+    "/health/dependencies": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/version": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/metrics": {
       "get": {
         "responses": {
           "200": {

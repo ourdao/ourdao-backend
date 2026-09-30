@@ -228,16 +228,16 @@ Base path: `/api`.
 
 **Core endpoints:**
 - `GET /health` — Liveness check + currently configured contract id (no DB round trip)
-- `GET /ready` — Readiness probe (checks Postgres reachability and indexer freshness)
+- `GET /ready` — Readiness probe (checks Postgres reachability and indexer freshness; a recorded ledger discontinuity answers `503` with `reason: reorg_detected`, see [Reorg detection](#reorg-detection))
 - `GET /version` — Build metadata (version, commit, build date)
-- `GET /api/stats` — Aggregate DAO statistics (members, loans, proposals, money figures, quarantine count, indexer state)
+- `GET /api/stats` — Aggregate DAO statistics (members, loans, proposals, money figures, quarantine count, indexer state, and `reorgDetected`/`reorgHalt` for an uncleared ledger discontinuity)
 - `GET /api/stats/history` — Daily loan principal lent/repaid, defaults, defaulted value, and cumulative default rate (`data` timeseries; money values are decimal strings)
 
 **Members:**
 - `GET /api/members` — Active members list
 - `GET /api/members/:address` — Single member details
 - `GET /api/members/:address/summary` — Member dashboard (member row, loans, notifications, relative position)
-- `GET /api/members/:address/activity` — Member's cross-entity activity feed
+- `GET /api/members/:address/activity` — Member's cross-entity activity feed (`?symbol=` narrows it to one of the member-activity event kinds; an out-of-set symbol is a `400`; plus `?before=<ledger>` and `?limit=`)
 
 **Loans:**
 - `GET /api/proposals/loan` — Loan proposals with vote tallies
@@ -261,7 +261,7 @@ Base path: `/api`.
 
 **Admin:**
 - `GET /api/admin/log` — Admin/governance audit trail
-- `GET /api/admin/failed-events` — Quarantined events
+- `GET /api/admin/failed-events` — Quarantined events, newest first: `?before=<id>` cursor, `?unresolved=true`, `?symbol=`, `?from_ledger=`/`?to_ledger=` (inclusive, at most 10000 ledgers apart), `?limit=`; `X-Total-Count` carries the size of the filtered set so the scale is visible without paging
 
 **Real-time:**
 - `GET /api/stream` — Server-Sent Events stream for real-time change notifications
@@ -342,13 +342,26 @@ Every response's `Cache-Control` comes from one of four **named policies** defin
 | Policy | Header | Applies to |
 |---|---|---|
 | `public-live` | `public, max-age=5, must-revalidate` | Tip-of-chain reads: `/members`, `/members/:address`, `/members/:address/activity`, `/proposals/*`, `/loans`, `/loans/:id`, the two `/timeline` routes, `/stats`, `/stats/history`, and `/events`, `/admin/log`, `/interest`, `/documents` **without** a cursor. |
-| `public-historical` | `public, max-age=31536000, immutable` | `/events` (`?before=`/`?after=`), `/admin/log`, `/interest`, `/documents` with a cursor. |
+| `public-historical` | `public, max-age=3600, must-revalidate` | Cursor pages, which are append-only behind the cursor: `/events` (`?before=`/`?after=`), `/admin/log?before=`, `/interest?before=`, `/documents?before=`. |
 | `private` | `private, no-cache` | Member-specific data: `/members/:address/summary`, `/notifications`. Never `public`. |
 | `no-store` | `no-store` | Authentication challenges, `PATCH` mutations, `/health`, `/ready`, `/version`, `/admin/failed-events`, and the `/stream` SSE endpoint. |
 
 - **Default:** a route that names no policy gets `no-store` (an `onRequest` hook), so omitting a decision can never make a response cacheable. An unknown directive is replaced with `no-store` and logged.
 - **Authenticated responses are never shared-cacheable:** a request carrying an `Authorization` header is downgraded from any `public-*` policy to `private`.
-- **ETag and revalidation:** `@fastify/etag` is registered globally. `public-live` and `private` rely on it — after `max-age` (or immediately, for `private`) the client sends `If-None-Match` and gets `304` when nothing changed. `public-historical` is deliberately never revalidated (`immutable` skips the conditional request). `no-store` responses carry no `ETag`, since nothing may be stored to revalidate.
+- **ETag and revalidation:** `@fastify/etag` is registered globally. Every `public-*` and `private` response relies on it — after `max-age` (or immediately, for `private`) the client sends `If-None-Match` and gets `304` when nothing changed. `no-store` responses carry no `ETag`, since nothing may be stored to revalidate.
+- **Lifetimes are bounded (issue #190):** no policy exceeds one hour and none is `immutable`. Cursor pages used to be cached for a year and never revalidated, which meant a wrong response (a filtering bug, a shape change) stayed pinned in every intermediary and browser with no way to invalidate it, because no URL carries a version. One hour is the longest an incident can be waited out; `immutable` is reserved for a future versioned path. `test/cache-policy.test.ts` enforces both bounds.
+- **Per endpoint:**
+
+  | Endpoint | Policy |
+  |---|---|
+  | `/health`, `/ready`, `/version`, `/metrics`, `/health/dependencies` | `no-store` |
+  | `/api/auth/*`, `PATCH /api/notifications/*`, `/api/admin/failed-events`, `/api/admin/failed-events/*`, `/api/admin/audit-log`, `/api/stream` | `no-store` |
+  | `/api/members/:address/summary`, `/api/notifications` | `private` |
+  | `/api/members`, `/api/members/:address`, `/api/members/:address/activity`, `/api/proposals/*`, `/api/loans`, `/api/loans/:id`, `/api/loans/:id/timeline`, `/api/proposals/treasury/:id/timeline`, `/api/stats`, `/api/stats/history` | `public-live` |
+  | `/api/events`, `/api/admin/log`, `/api/interest`, `/api/documents` without a cursor | `public-live` |
+  | `/api/events`, `/api/admin/log`, `/api/interest`, `/api/documents` with `?before=` (or `?after=`) | `public-historical` |
+
+  `/api/documents` is public data (which proposals carry attachments, from on-chain events); the `?caller=` filter selects by a public address and adds nothing member-specific, so its pages stay `public`.
 
 ### Reorg detection
 
@@ -358,6 +371,7 @@ Stellar's consensus gives fast finality, so a deep reorg is genuinely unlikely �
 
 - The cursor stores `last_ledger` and `last_ledger_hash` — the hash of that same ledger, fetched by sequence from the RPC (Soroban's `getEvents` exposes no per-event ledger hash, so this is the only way to get one).
 - Each poll checks continuity two ways: if the RPC's reported latest ledger is **below** the last folded ledger, or a fetched page contains an event from a ledger already folded past, the indexer **halts** with a loud log line instead of retrying. It also re-fetches the RPC's current hash for `last_ledger` and compares it against what's stored (issue #128) — this catches a **same-height fork**, where history diverges without the ledger sequence ever moving backwards, which the sequence-only checks can't see. A ledger the RPC has since pruned is treated as unverifiable, not as a fork.
+- **The halt is recorded, not only logged (issue #191):** before the worker exits it writes the discontinuity (contract, last folded ledger and hash, detail) to `reorg_halts`. While that record is uncleared, `GET /ready` answers `503` with `reason: reorg_detected` (a different reason from `indexer_stale`, so an orchestrator can tell a deliberate halt from a slow RPC), `GET /api/stats` reports `reorgDetected: true` with the details in `reorgHalt`, and **the worker refuses to start** — an automatic container restart cannot resume past diverged history. `npm run reindex` clears the record in the same transaction as the rebuild; `npm run reorg:clear` acknowledges a false alarm without rebuilding.
 - **Recovery:** stop the indexer worker (`node dist/worker.js`) and run `npm run reindex` (`node dist/indexer/reindex.js` in the container). It truncates the derived tables and rebuilds them from the raw `events` log in one transaction — the log is authoritative and untouched. A rebuild produces state identical to the incremental fold (asserted by a test), so `reindex` is also the repair path for the historical-data bugs tracked in other issues. The complete diagnosis-and-recovery procedure is the runbook: [`docs/REORG_RECOVERY.md`](./docs/REORG_RECOVERY.md).
 - **Worker serialization (Advisory Lock):** Both `reindex` and the worker's event fold loops acquire a dedicated session-level Postgres advisory lock (`0x0d400001`). If a reindex is attempted while a worker is running or folding, it fails immediately with an actionable error rather than racing to corrupt derived state.
 - **Streaming & Memory Bounds:** The rebuild streams the event log via keyset pagination over `(ledger, id)` in batches (default 1,000) inside a single transaction, keeping Node.js memory flat (~40–60 MB RSS) regardless of event log size (e.g., 100k+ events). Progress is logged periodically with event counts, percentage, throughput (events/s), and estimated ETA.

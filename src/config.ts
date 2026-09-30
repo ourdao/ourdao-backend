@@ -196,9 +196,6 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // pool is created, defaulting to `api`).
     applicationName: str(env, 'DB_APPLICATION_NAME') || `ourdao-${str(env, 'OURDAO_PROCESS_ROLE', 'api')}`,
   },
-  cache: {
-    historyRedisUrl: str(env, 'REDIS_URL') || undefined,
-  },
   stellar: {
     contractId: str(env, 'CONTRACT_ID'),
     // Issue #289: multi-contract tailing (e.g. a governance DAO contract and
@@ -259,6 +256,9 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // class of problem: a burst of polls against the same key collapses to
     // one Postgres read, and clients are never stale by more than this.
     memberCacheTtlSeconds: int(env, 'MEMBER_CACHE_TTL_SECONDS', 30),
+    // The /stats/history cache (src/api/history-cache.ts) shares the same
+    // optional Redis instance.
+    historyRedisUrl: str(env, 'REDIS_URL') || undefined,
   },
   // Issue #279: periodic VACUUM ANALYZE + expired-row cleanup, run from the
   // worker process (src/worker.ts) alongside the indexer loop.
@@ -266,6 +266,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv) {
     // Weekly by default — vacuuming is comparatively rare maintenance, not a
     // hot-path concern; configurable for operators who want it tighter.
     intervalMs: int(env, 'MAINTENANCE_INTERVAL_MS', 7 * 24 * 60 * 60 * 1000),
+  },
   otel: {
     // Issue #288: tracing is opt-in — most local/dev/test runs have no OTLP
     // collector to send spans to, and OpenTelemetry's own SDK already

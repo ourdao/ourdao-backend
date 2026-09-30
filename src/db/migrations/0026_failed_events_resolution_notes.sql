@@ -1,4 +1,4 @@
--- compat: backward-compatible
+-- compat: breaking (adds a CHECK constraint on failed_events.resolution; no release writes that column before this one, so no existing row can violate it)
 -- Issue #287: batch-resolving quarantined failed_events needs somewhere to
 -- record *why* (resolved vs deliberately ignored) and an optional operator
 -- note, alongside the existing resolved_at timestamp (#168). Both columns

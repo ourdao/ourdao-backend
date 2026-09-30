@@ -56,7 +56,7 @@ async function loadMigrations(): Promise<MigrationFile[]> {
  * Return a sorted list of `table_name.column_name` pairs for every
  * user-created table in the given client's current database.
  */
-async function schemaColumns(client: pg.Client): Promise<string[]> {
+async function schemaColumns(client: pg.Client | pg.PoolClient): Promise<string[]> {
   const res = await client.query<{ table_name: string; column_name: string }>(
     `SELECT table_name, column_name
        FROM information_schema.columns
@@ -70,7 +70,7 @@ async function schemaColumns(client: pg.Client): Promise<string[]> {
  * Return a sorted list of index names for every user-created table in the
  * given client's current database.
  */
-async function schemaIndexes(client: pg.Client): Promise<string[]> {
+async function schemaIndexes(client: pg.Client | pg.PoolClient): Promise<string[]> {
   const res = await client.query<{ indexname: string }>(
     `SELECT indexname
        FROM pg_indexes

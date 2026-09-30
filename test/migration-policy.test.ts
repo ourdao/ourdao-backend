@@ -26,7 +26,7 @@ describe('migration reversibility policy (issue #197)', () => {
       .filter(({ sql }) => parseCompat(sql)?.kind === 'breaking')
       .map(({ name }) => name.slice(0, 4))
     // Keep in sync with docs/DEPLOYMENT.md "Rolling back a bad deploy".
-    expect(breaking).toEqual(['0001', '0012', '0017', '0022', '0024'])
+    expect(breaking).toEqual(['0001', '0012', '0017', '0022', '0024', '0026', '0027'])
   })
 
   it('rejects a missing annotation and an unannotated destructive change', () => {

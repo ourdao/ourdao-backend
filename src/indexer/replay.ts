@@ -90,7 +90,7 @@ export async function replayFailedEvent(eventId: string): Promise<ReplayOutcome>
 
   try {
     const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1)',
+      'SELECT pg_try_advisory_lock($1, hashtext(current_schema()))',
       [REINDEX_LOCK_KEY]
     )
     if (!lockRes.rows[0]?.pg_try_advisory_lock) {
@@ -158,7 +158,7 @@ export async function replayFailedEvent(eventId: string): Promise<ReplayOutcome>
   } finally {
     if (lockAcquired) {
       try {
-        await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+        await client.query('SELECT pg_advisory_unlock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
       } catch (err) {
         logger.error('replay: failed to release advisory lock', {
           eventId,

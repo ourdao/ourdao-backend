@@ -343,6 +343,18 @@ docker run --env-file .env ourdao-backend node dist/indexer/reindex.js
 
 `reindex` is also the repair path after a detected reorg (see [Reorg detection](../README.md#reorg-detection)) and after fixing a quarantined event handler (see [Quarantine](../README.md#quarantine)).
 
+### After a detected reorg
+
+When the worker detects a ledger discontinuity it records it in `reorg_halts` and exits non-zero. From then on `GET /ready` answers `503 {"reason":"reorg_detected", "reorg": {...}}`, `GET /api/stats` reports `reorgDetected: true`, and **the worker refuses to start** with `[indexer] REFUSING TO RESUME` — a supervisor restart cannot fold past the divergence. The API keeps serving the already-folded state.
+
+1. Stop the worker (or leave it stopped; it will not resume on its own).
+2. Triage with [`docs/REORG_RECOVERY.md`](./REORG_RECOVERY.md) section 5: read the record (`SELECT * FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1;` or `GET /ready`), confirm the chain state against a second RPC.
+3. Real divergence: run `npm run reindex` (`node dist/indexer/reindex.js` in the container). It rebuilds every derived table from the raw log and clears the halt in the same transaction. Do not clear the halt by hand and restart the worker instead — that folds the diverged history on top of the old state.
+4. False alarm (an RPC that briefly served a wrong hash and now agrees again): run `npm run reorg:clear` (`node dist/indexer/clear-reorg.js`). Nothing is rebuilt; the record is kept with `cleared_by = 'operator'`.
+5. Start the worker and confirm `GET /ready` is `200` and `GET /api/stats.reorgDetected` is `false`.
+
+The records are never deleted, so `SELECT * FROM reorg_halts ORDER BY id` is the audit trail of every halt and how it was closed.
+
 ### The `events` log is append-only
 
 `events` rows are never mutated or deleted by normal operation. This is an architectural invariant, not just a convention — it is what makes `reindex` reliable. Do not write application code that modifies existing `events` rows. If an event was incorrectly decoded, fix the decoder and reindex; do not patch the raw row.
@@ -403,6 +415,8 @@ Migrations run automatically on boot, so starting the previous image does **not*
 | `0017_approved_pending_disbursement_status` | **breaking** — widens the status `CHECK` | Rows may hold `approved_pending_disbursement`, which a release predating it does not handle. Reindex is not enough if it has already folded such rows; roll forward. |
 | `0022_failed_events_uniqueness` | **breaking** — `UNIQUE(event_id)` | A release predating it inserts into `failed_events` without `ON CONFLICT`, so a repeat failure of the same event errors on the quarantine path. |
 | `0024_auth_nonces_rekey` | **breaking** — rekeys `auth_nonces` on `nonce` | A release predating it assumes one row per address; outstanding challenges are the only data at stake, so rolling forward is the fix. |
+| `0026_failed_events_resolution_notes` | **breaking** — adds a `CHECK` on `failed_events.resolution` | No release before it writes `resolution`, so no row can violate the constraint; listed because the policy treats any new constraint as breaking. Rolling back is safe. |
+| `0027_multi_contract_cursor` | **breaking** — `indexer_cursor` keyed by `contract_id` | A release predating it reads the single `id = 1` cursor row, which no longer exists; roll forward, or restore the pre-migration cursor row before starting the old worker. |
 | all others (`0002`–`0010`, `0013`, `0015`, `0016`, `0018`–`0021`, `0023`, `0025`) | backward-compatible | Additive columns/tables/indexes; safe to roll back across. |
 
 Versions `0011` and `0014` are unused (gaps are allowed; see the loader in `src/db/migrate.ts`).

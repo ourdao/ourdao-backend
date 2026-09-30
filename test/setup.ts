@@ -18,6 +18,17 @@ process.env.TEST_SCHEMA = testSchema
 process.env.DATABASE_URL =
   process.env.TEST_DATABASE_URL ?? 'postgres://ourdao:ourdao@localhost:5432/ourdao_test'
 
+// Every connection this process opens — the shared pool, dedicated
+// listener/maintenance clients, the reindex client, and any ad-hoc `pg.Pool`
+// a test creates — must resolve unqualified table names in this worker's
+// schema. `PGOPTIONS` is read by node-postgres as the libpq startup
+// `options` parameter, so the search_path is applied at connection time
+// with no shared state. (An earlier version set it with
+// `ALTER ROLE ... SET search_path`, which is role-wide: parallel workers
+// overwrote each other's default and connections opened mid-run landed in
+// another worker's schema.)
+process.env.PGOPTIONS = `-c search_path=${testSchema},public`
+
 // buildServer() (src/api/server.ts) reads this to configure its Fastify
 // logger. Route tests build a real server per-test, so leaving it at the
 // 'info' default would drown test output in per-request log lines.
@@ -28,14 +39,10 @@ const { pool } = await import('../src/db/index.js')
 const { migrate } = await import('../src/db/migrate.js')
 
 try {
-  // Create schema if it doesn't exist
+  // Create schema if it doesn't exist. The connection already has
+  // search_path pointed at it via PGOPTIONS above.
   await pool.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`)
-  // Set search_path for this connection and all future connections from this pool
-  await pool.query(`SET search_path TO "${testSchema}", public`)
-  // pg-pool reuses connections; ensure every future connection from this pool
-  // gets the same search_path, without affecting the database default.
-  await pool.query(`ALTER ROLE ${pool.options.user || 'ourdao'} IN DATABASE ${pool.options.database || 'ourdao_test'} SET search_path TO "${testSchema}", public`)
-  
+
   // Apply migrations to this schema
   await migrate()
 } catch (err) {

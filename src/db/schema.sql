@@ -240,8 +240,21 @@ CREATE TABLE IF NOT EXISTS failed_events (
   ledger      BIGINT NOT NULL,
   error       TEXT NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  resolved_at TIMESTAMPTZ
+  resolved_at TIMESTAMPTZ,
+  -- Why a record was resolved and an optional operator note (migration 0026,
+  -- issue #287); nullable so rows resolved by reindex/replay stay valid.
+  resolution  TEXT,
+  resolution_note TEXT
 );
+-- A database bootstrapped before migration 0026 already has the table, so the
+-- CREATE above no-ops; add the columns the same idempotent way the migration does.
+ALTER TABLE failed_events ADD COLUMN IF NOT EXISTS resolution TEXT;
+ALTER TABLE failed_events ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+DO $$ BEGIN
+  ALTER TABLE failed_events ADD CONSTRAINT failed_events_resolution_check
+    CHECK (resolution IS NULL OR resolution IN ('resolved', 'ignored'));
+EXCEPTION WHEN duplicate_table OR duplicate_object THEN NULL;
+END $$;
 -- One row per distinct failing event (migration 0022, issue #171).
 DO $$ BEGIN
   ALTER TABLE failed_events ADD CONSTRAINT failed_events_event_id_unique UNIQUE (event_id);
@@ -274,6 +287,24 @@ CREATE TABLE IF NOT EXISTS quarantine_state (
   CONSTRAINT single_row CHECK (id = 1)
 );
 CREATE INDEX IF NOT EXISTS quarantine_state_escalated_at_idx ON quarantine_state (escalated_at);
+
+-- A detected ledger discontinuity (issue #191). One row per halt. The latest
+-- row with `cleared_at IS NULL` stops the worker from resuming (an automatic
+-- restart must not fold past diverged history) and is surfaced by `/ready`
+-- (`reason: reorg_detected`) and `/api/stats.reorgHalt` until an operator
+-- clears it: `npm run reindex` clears it as part of the rebuild, and
+-- `npm run reorg:clear` acknowledges a false alarm without rebuilding.
+CREATE TABLE IF NOT EXISTS reorg_halts (
+  id               BIGSERIAL PRIMARY KEY,
+  contract_id      TEXT NOT NULL,
+  last_ledger      BIGINT,
+  last_ledger_hash TEXT,
+  detail           TEXT NOT NULL,
+  detected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  cleared_at       TIMESTAMPTZ,
+  cleared_by       TEXT
+);
+CREATE INDEX IF NOT EXISTS reorg_halts_uncleared_idx ON reorg_halts (id DESC) WHERE cleared_at IS NULL;
 
 -- One row per `doc_attn` event (issue #44): the existence and history of a
 -- proposal's attached documents, not the content hash itself (that's read

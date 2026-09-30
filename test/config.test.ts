@@ -138,11 +138,10 @@ describe('resolveConfig', () => {
         idleTimeoutMs: 30000,
         applicationName: 'ourdao-api',
       },
-      cache: {
-        historyRedisUrl: undefined,
-      },
       stellar: {
         contractId: '',
+        contractIds: [],
+        rpcHeaders: {},
         rpcUrl: 'https://soroban-testnet.stellar.org',
         networkPassphrase: 'Test SDF Network ; September 2015',
         ledgerCloseTimeSeconds: 5,
@@ -162,9 +161,15 @@ describe('resolveConfig', () => {
       cache: {
         redisUrl: undefined,
         memberCacheTtlSeconds: 30,
+        historyRedisUrl: undefined,
       },
       maintenance: {
         intervalMs: 7 * 24 * 60 * 60 * 1000,
+      },
+      otel: {
+        enabled: false,
+        exporterOtlpEndpoint: 'http://localhost:4318/v1/traces',
+        serviceName: 'ourdao-backend',
       },
     })
   })

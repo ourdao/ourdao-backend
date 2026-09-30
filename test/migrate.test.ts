@@ -83,7 +83,7 @@ describe('migrate()', () => {
 
     // And the column/index it adds are genuinely present, not just the record.
     const col = await pool.query(
-      `SELECT 1 FROM information_schema.columns WHERE table_name = 'notifications' AND column_name = 'event_id'`
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'notifications' AND column_name = 'event_id'`
     )
     expect(col.rows).toHaveLength(1)
   })
@@ -111,7 +111,7 @@ describe('migrate()', () => {
       expect(recorded.rows).toHaveLength(0)
 
       const tableExists = await pool.query(
-        `SELECT 1 FROM information_schema.tables WHERE table_name = 'test_migrate_after_broken'`
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'test_migrate_after_broken'`
       )
       expect(tableExists.rows).toHaveLength(0)
     } finally {
@@ -150,14 +150,14 @@ describe('migrate()', () => {
     // auth_nonces (0018), events.decode_error (0019) and
     // notifications.event_id (0020) — the three renumbered ex-duplicates —
     // must all three actually exist, not just be recorded.
-    const authNonces = await pool.query(`SELECT 1 FROM information_schema.tables WHERE table_name = 'auth_nonces'`)
+    const authNonces = await pool.query(`SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'auth_nonces'`)
     expect(authNonces.rows).toHaveLength(1)
     const decodeError = await pool.query(
-      `SELECT 1 FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'decode_error'`
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'events' AND column_name = 'decode_error'`
     )
     expect(decodeError.rows).toHaveLength(1)
     const eventIdCol = await pool.query(
-      `SELECT 1 FROM information_schema.columns WHERE table_name = 'notifications' AND column_name = 'event_id'`
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'notifications' AND column_name = 'event_id'`
     )
     expect(eventIdCol.rows).toHaveLength(1)
   })
@@ -189,7 +189,7 @@ describe('0024_auth_nonces_rekey.sql against a database that predates it', () =>
     const rows = await pool.query('SELECT address, nonce FROM auth_nonces')
     expect(rows.rows).toEqual([{ address: 'GLIVE', nonce: 'n1' }])
     const idx = await pool.query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes WHERE tablename = 'auth_nonces' ORDER BY indexname`
+      `SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'auth_nonces' ORDER BY indexname`
     )
     expect(idx.rows.map((r) => r.indexname)).toEqual(['auth_nonces_address_idx', 'auth_nonces_expires_at_idx', 'auth_nonces_new_pkey'])
   })

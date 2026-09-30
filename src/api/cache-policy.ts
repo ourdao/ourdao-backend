@@ -10,8 +10,14 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
  *   After 5s a cache must revalidate; with `@fastify/etag` that is a cheap
  *   conditional request answered with 304 when nothing changed.
  * - `public-historical` — a page reached through a `?before=`/`?after=`
- *   cursor. Rows behind the cursor are append-only, so it is cached for a
- *   year and never revalidated (`immutable` bypasses ETag by design).
+ *   cursor. Rows behind the cursor are append-only, so shared caches may
+ *   hold the page for an hour; after that they revalidate through ETag like
+ *   everything else. Issue #190: it used to be `max-age=31536000, immutable`,
+ *   which pinned any wrong response — a filtering bug, a shape change — in
+ *   every intermediary and browser for a year with no way to invalidate,
+ *   since no URL carries a version. One hour is the longest the team can
+ *   wait out during an incident; `immutable` comes back only if a versioned
+ *   path is ever introduced.
  * - `private` — member-specific data. Never `public`; `no-cache` forces every
  *   reuse to revalidate via ETag, so a shared cache can neither store nor
  *   serve it to someone else.
@@ -21,7 +27,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
  */
 export const CACHE_POLICIES = {
   'public-live': 'public, max-age=5, must-revalidate',
-  'public-historical': 'public, max-age=31536000, immutable',
+  'public-historical': 'public, max-age=3600, must-revalidate',
   private: 'private, no-cache',
   'no-store': 'no-store',
 } as const
@@ -39,6 +45,10 @@ export function isKnownCacheControl(value: unknown): boolean {
 export function setCachePolicy(reply: FastifyReply, policy: CachePolicyName): void {
   reply.header('Cache-Control', CACHE_POLICIES[policy])
 }
+
+/** Longest lifetime any policy may grant a shared cache: one hour. A bad
+ *  response must be recoverable within the span of an incident (issue #190). */
+export const MAX_CACHE_LIFETIME_SECONDS = 3600
 
 /** Picks `public-historical` for a cursor page and `public-live` for the tip. */
 export function historicalOrLive(hasCursor: boolean): CachePolicyName {

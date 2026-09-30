@@ -1,8 +1,9 @@
--- compat: breaking (indexer_cursor moves from a single `id = 1` singleton
--- row to one row per contract_id, primary-keyed on contract_id — see #289.
--- A deployment tailing more than one contract needs an independent
+-- compat: breaking (indexer_cursor is keyed by contract_id instead of a single id = 1 row; a release predating it reads the singleton row that no longer exists)
+-- Issue #289: indexer_cursor moves from a single `id = 1` singleton row to
+-- one row per contract_id, primary-keyed on contract_id. A deployment
+-- tailing more than one contract needs an independent
 -- paging_token/last_ledger/last_ledger_hash per contract; a shared singleton
--- row can only ever track one.)
+-- row can only ever track one.
 --
 -- A pre-existing singleton row with contract_id already set (the normal
 -- case — every cursor write already stamps contract_id, see #16) is kept

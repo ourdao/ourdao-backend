@@ -1,3 +1,4 @@
+-- compat: backward-compatible
 -- Pre-aggregated UTC daily loan metrics for GET /api/stats/history.
 CREATE TABLE IF NOT EXISTS daily_loan_stats (
   day                 DATE PRIMARY KEY,

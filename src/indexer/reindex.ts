@@ -5,6 +5,11 @@ import { namedFields, type DecodedEvent } from '../stellar/events.js'
 import { DERIVED_TABLES, resetDaoTotals } from './derived-tables.js'
 import { notifyStreamClientsAfterCommit, type StreamChannel } from '../api/stream.js'
 
+// Every acquisition pairs this key with `hashtext(current_schema())`, so the
+// lock is scoped to the schema the data lives in: one lock per deployment in
+// production (a single `public` schema), and one per worker schema in the
+// test suite, whose parallel workers would otherwise block one another
+// through the database-wide key.
 // Arbitrary fixed key for a session-level advisory lock, distinct from
 // MIGRATION_LOCK_KEY (0x0d40_0000). The indexer worker and reindex command
 // share this lock to ensure a reindex never races a live worker folding events.
@@ -61,7 +66,7 @@ export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ e
 
   try {
     const lockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1)',
+      'SELECT pg_try_advisory_lock($1, hashtext(current_schema()))',
       [REINDEX_LOCK_KEY]
     )
     if (!lockRes.rows[0]?.pg_try_advisory_lock) {
@@ -168,6 +173,13 @@ export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ e
     // failed and why) survives, but stop counting it as a live problem.
     await client.query(`UPDATE failed_events SET resolved_at = now() WHERE resolved_at IS NULL`)
 
+    // Issue #191: a completed rebuild is the recovery from a detected
+    // discontinuity, so clear the recorded halt in the same transaction —
+    // the worker may resume as soon as this commits, and not before.
+    await client.query(
+      `UPDATE reorg_halts SET cleared_at = now(), cleared_by = 'reindex' WHERE cleared_at IS NULL`
+    )
+
     await client.query('COMMIT')
   } catch (err) {
     if (lockAcquired) {
@@ -181,7 +193,7 @@ export async function reindexFromEventLog(options?: ReindexOptions): Promise<{ e
   } finally {
     if (lockAcquired) {
       try {
-        await client.query('SELECT pg_advisory_unlock($1)', [REINDEX_LOCK_KEY])
+        await client.query('SELECT pg_advisory_unlock($1, hashtext(current_schema()))', [REINDEX_LOCK_KEY])
       } catch (err) {
         console.error('[reindex] failed to release advisory lock:', err)
       }

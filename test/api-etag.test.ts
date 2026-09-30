@@ -52,7 +52,9 @@ describe('API: ETags and Caching', () => {
   it('sets correct Cache-Control for historical queries', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/events?before=100' })
     expect(res.statusCode).toBe(200)
-    expect(res.headers['cache-control']).toBe('public, max-age=31536000, immutable')
+    // Issue #190: cursor pages are cached for at most an hour and revalidate;
+    // `immutable` is gone because no URL carries a version to invalidate with.
+    expect(res.headers['cache-control']).toBe('public, max-age=3600, must-revalidate')
   })
 
   it('sets correct Cache-Control for live tip queries', async () => {

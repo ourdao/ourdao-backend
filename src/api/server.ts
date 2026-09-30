@@ -19,6 +19,13 @@ import { fileURLToPath } from 'url'
 import { server as rpcServer } from '../stellar/rpc.js'
 import { metricsRegistry } from './metrics.js'
 
+interface ReorgHaltRow {
+  contract_id: string
+  last_ledger: number | null
+  detail: string
+  detected_at: string
+}
+
 interface CursorRow {
   last_ledger: number | null
   observed_tip_ledger: number | null
@@ -309,6 +316,35 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
         .then((r) => r.rows[0] ?? null)
     } catch {
       // Table may not exist yet — treat as cold start
+    }
+
+    // 3. A recorded, uncleared ledger discontinuity (issue #191). Reported
+    // before staleness and before cold start: the worker halted on purpose,
+    // a restart is the wrong response, and an orchestrator must not read
+    // the resulting idle cursor as an ordinary `indexer_stale`.
+    let halt: ReorgHaltRow | null = null
+    try {
+      halt = await pool
+        .query<ReorgHaltRow>(
+          'SELECT contract_id, last_ledger, detail, detected_at FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1'
+        )
+        .then((r) => r.rows[0] ?? null)
+    } catch {
+      // Table may not exist yet on a database that predates migration 0030.
+    }
+    if (halt) {
+      return reply.code(503).send({
+        status: 'not ready',
+        reason: 'reorg_detected',
+        reorg: {
+          detectedAt: new Date(halt.detected_at).toISOString(),
+          contractId: halt.contract_id,
+          lastLedger: halt.last_ledger,
+          detail: halt.detail,
+        },
+        lastIndexedLedger: row?.last_ledger ?? null,
+        observedTipLedger: row?.observed_tip_ledger ?? null,
+      })
     }
 
     if (!row || row.last_ledger === null || row.updated_at === null) {

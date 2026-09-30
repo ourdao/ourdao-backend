@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { Keypair } from '@stellar/stellar-sdk'
 import { buildServer } from '../src/api/server.js'
-import { CACHE_POLICIES, DEFAULT_CACHE_POLICY, isKnownCacheControl, registerCachePolicy } from '../src/api/cache-policy.js'
+import { CACHE_POLICIES, DEFAULT_CACHE_POLICY, isKnownCacheControl, registerCachePolicy, MAX_CACHE_LIFETIME_SECONDS } from '../src/api/cache-policy.js'
 import Fastify from 'fastify'
 import { closeDb, resetDb } from './db.js'
 
@@ -17,6 +17,28 @@ function sourceFiles(dir: string): string[] {
     return statSync(p).isDirectory() ? sourceFiles(p) : p.endsWith('.ts') ? [p] : []
   })
 }
+
+describe('no response is cached beyond an incident window (issue #190)', () => {
+  const maxAge = (value: string): number | null => {
+    const m = /max-age=(\d+)/.exec(value)
+    return m ? Number(m[1]) : null
+  }
+
+  it('no policy is immutable — nothing carries a URL version to invalidate with', () => {
+    for (const value of Object.values(CACHE_POLICIES)) {
+      expect(value).not.toMatch(/immutable/)
+    }
+  })
+
+  it('every max-age is at most one hour and every public policy revalidates', () => {
+    for (const value of Object.values(CACHE_POLICIES)) {
+      const age = maxAge(value)
+      if (age !== null) expect(age).toBeLessThanOrEqual(MAX_CACHE_LIFETIME_SECONDS)
+      if (value.startsWith('public')) expect(value).toMatch(/must-revalidate/)
+    }
+    expect(maxAge(CACHE_POLICIES['public-historical'])).toBe(MAX_CACHE_LIFETIME_SECONDS)
+  })
+})
 
 describe('cache policies (issue #194)', () => {
   it('no source file outside cache-policy.ts writes a Cache-Control directive', () => {

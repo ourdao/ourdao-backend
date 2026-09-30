@@ -147,7 +147,7 @@ describe('amount columns keep scale zero (issue #195)', () => {
     const rows = await query<{ table_name: string; column_name: string; numeric_scale: number | null }>(
       `SELECT table_name, column_name, numeric_scale
          FROM information_schema.columns
-        WHERE table_schema = 'public' AND data_type = 'numeric'`
+        WHERE table_schema = current_schema() AND data_type = 'numeric'`
     )
     expect(rows.length).toBeGreaterThan(0)
     const scaled = rows.filter((r) => r.numeric_scale !== 0).map((r) => `${r.table_name}.${r.column_name}`)

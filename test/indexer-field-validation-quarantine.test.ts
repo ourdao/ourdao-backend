@@ -384,7 +384,8 @@ describe('indexer: a FieldValidationError rolls back the whole page, then quaran
 
     // And indexing continued past it.
     const cursor = await queryOne<{ paging_token: string }>(
-      'SELECT paging_token FROM indexer_cursor WHERE id = 1'
+      'SELECT paging_token FROM indexer_cursor WHERE contract_id = $1',
+      [CONTRACT]
     )
     expect(cursor?.paging_token).toBe(good2.id)
   })

@@ -126,6 +126,10 @@ function validAddress(address: string): boolean {
   return StrKey.isValidEd25519PublicKey(address)
 }
 
+function isMemberActivitySymbol(v: unknown): v is (typeof MEMBER_ACTIVITY_SYMBOLS)[number] {
+  return typeof v === 'string' && (MEMBER_ACTIVITY_SYMBOLS as readonly string[]).includes(v)
+}
+
 // Validate a positive integer path param (loan / proposal id). Returns the
 // trimmed decimal string on success (kept as a string so it compares
 // directly against the JSONB-extracted `data->>0`), or null.
@@ -253,6 +257,8 @@ async function fetchMemberSummary(address: string): Promise<MemberSummary | null
   `, [address])
 
   return row?.summary ?? null
+}
+
 // Issue #291: write one row to admin_audit_log for every authenticated admin
 // action. Called fire-and-forget — a logging failure must never block the
 // action itself; errors are logged via the request logger so they appear in
@@ -396,7 +402,24 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   // restricts to MEMBER_ACTIVITY_SYMBOLS so an address that only appears as
   // e.g. a treasury `destination` doesn't show up here. `?before=<ledger>`
   // cursor, like the other historical feeds.
-  app.get<{ Params: { address: string } }>('/members/:address/activity', async (req, reply) => {
+  app.get<{ Params: { address: string } }>('/members/:address/activity', {
+    schema: {
+      tags: ['Members'],
+      summary: "A member's cross-entity activity feed",
+      querystring: {
+        type: 'object',
+        properties: {
+          limit: { type: 'string', description: 'Max rows to return (1-200, default 50).' },
+          before: { type: 'string', description: 'Pagination cursor: return rows from ledgers strictly below this value.' },
+          symbol: {
+            type: 'string',
+            enum: [...MEMBER_ACTIVITY_SYMBOLS],
+            description: 'Narrow the feed to one activity kind (issue #193). Must be one of the member-activity symbols; anything else is a 400.',
+          },
+        },
+      },
+    },
+  }, async (req, reply) => {
     setCachePolicy(reply, 'public-live')
     if (!validAddress(req.params.address)) {
       return reply.code(400).send({ error: 'invalid Stellar address' })
@@ -407,8 +430,28 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     const before = cursor(q.before)
     if (invalidCursor(q.before)) return reply.code(400).send({ error: 'invalid before cursor' })
 
-    const params: unknown[] = [MEMBER_ACTIVITY_SYMBOLS as unknown as string[], req.params.address]
-    let where = `WHERE symbol = ANY($1) AND data @> to_jsonb($2::text)`
+    // Issue #193: `?symbol=` narrows the feed to one activity kind. A symbol
+    // outside MEMBER_ACTIVITY_SYMBOLS is rejected explicitly — the unfiltered
+    // query could never have returned it, so a silently empty page would
+    // only hide a client typo.
+    const symbolFilter = q.symbol
+    if (symbolFilter !== undefined && !isMemberActivitySymbol(symbolFilter)) {
+      return reply.code(400).send({
+        error: `invalid symbol filter: expected one of ${MEMBER_ACTIVITY_SYMBOLS.join(', ')}`,
+      })
+    }
+
+    // With a symbol the predicate is an equality on the btree-indexed column
+    // plus the GIN containment; without one it stays `= ANY(...)` over the
+    // whole activity set. Plans for both shapes are recorded in
+    // docs/member-activity-query-plan.md.
+    const params: unknown[] = [
+      symbolFilter ?? (MEMBER_ACTIVITY_SYMBOLS as unknown as string[]),
+      req.params.address,
+    ]
+    let where = symbolFilter !== undefined
+      ? `WHERE symbol = $1 AND data @> to_jsonb($2::text)`
+      : `WHERE symbol = ANY($1) AND data @> to_jsonb($2::text)`
     if (before !== null) {
       params.push(before)
       where += ` AND ledger < $${params.length}`
@@ -892,11 +935,20 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
           limit: { type: 'string', description: 'Max rows to return (1-200, default 50).' },
           before: { type: 'string', description: 'Pagination cursor: return rows with a strictly smaller id than this value.' },
           unresolved: { type: 'string', enum: ['true', 'false'], description: 'When "true", only rows a reindex/replay has not yet resolved.' },
+          symbol: { type: 'string', description: 'Only failures of events with this symbol (issue #192).' },
+          from_ledger: { type: 'string', description: 'Only failures from this ledger onwards (issue #192).' },
+          to_ledger: { type: 'string', description: 'Only failures up to and including this ledger (issue #192). With from_ledger, the range may span at most 10000 ledgers.' },
         },
       },
       response: {
         200: {
           type: 'array',
+          headers: {
+            'x-total-count': {
+              type: 'integer',
+              description: 'Rows matching every filter except the before cursor: the size of the whole quarantine, however far the page is (issue #192).',
+            },
+          },
           items: {
             type: 'object',
             properties: {
@@ -927,14 +979,49 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     // full history, resolved records included.
     const onlyUnresolved = q.unresolved === 'true'
 
+    // Issue #192: symbol and ledger-range filters, validated with the same
+    // helpers /events uses so the two feeds reject the same inputs.
+    if (q.symbol !== undefined && (typeof q.symbol !== 'string' || q.symbol.trim() === '')) {
+      return reply.code(400).send({ error: 'invalid symbol filter' })
+    }
+    const symbol = typeof q.symbol === 'string' ? q.symbol.trim() : null
+    if (invalidLedgerRange(q.from_ledger, q.to_ledger)) {
+      return reply.code(400).send({
+        error: 'invalid ledger range: from_ledger/to_ledger must be non-negative integers, from_ledger <= to_ledger, and the range must not exceed 10000 ledgers',
+      })
+    }
+    const fromLedger = ledgerBound(q.from_ledger)
+    const toLedger = ledgerBound(q.to_ledger)
+
     const params: unknown[] = []
     const conditions: string[] = []
+    if (onlyUnresolved) {
+      conditions.push(`resolved_at IS NULL`)
+    }
+    if (symbol !== null) {
+      params.push(symbol)
+      conditions.push(`symbol = $${params.length}`)
+    }
+    if (fromLedger !== null) {
+      params.push(fromLedger)
+      conditions.push(`ledger >= $${params.length}`)
+    }
+    if (toLedger !== null) {
+      params.push(toLedger)
+      conditions.push(`ledger <= $${params.length}`)
+    }
+    // The total counts everything the filters match, cursor excluded, so an
+    // operator sees the scale of the quarantine without paging to the end.
+    const filterWhere = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const total = await queryOne<{ total: number }>(
+      `SELECT count(*)::int AS total FROM failed_events ${filterWhere}`,
+      [...params]
+    )
+    reply.header('X-Total-Count', String(total?.total ?? 0))
+
     if (before !== null) {
       params.push(before)
       conditions.push(`id < $${params.length}`)
-    }
-    if (onlyUnresolved) {
-      conditions.push(`resolved_at IS NULL`)
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     params.push(l)
@@ -974,6 +1061,8 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       return reply.code(422).send({ eventId: outcome.eventId, status: outcome.status })
     }
     return { eventId: outcome.eventId, status: outcome.status }
+  })
+
   // Issue #287: resolving quarantined events one at a time via direct SQL
   // doesn't scale once a bad handler/schema change quarantines a batch of
   // them at once. Accepts up to 500 ids per call (matching this codebase's
@@ -1015,6 +1104,8 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     })
 
     return { resolved: resolvedCount }
+  })
+
   // --- Admin audit log (issue #291) ---
   // Exposes the immutable admin_audit_log table to authorized maintainers.
   // Authentication is required: only a holder of a valid Stellar signature
@@ -1046,7 +1137,9 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     }
     // Optional filter by action type — any non-empty string is accepted so
     // future action labels don't require a server deploy to query.
-    if (q.action !== undefined && (typeof q.action !== 'string' || q.action.trim() === '')) {
+    // An empty `?action=` means "no filter", like every other optional
+    // string filter in this file; only a non-string (repeated param) is an error.
+    if (q.action !== undefined && typeof q.action !== 'string') {
       return reply.code(400).send({ error: 'invalid action filter' })
     }
 
@@ -1110,6 +1203,10 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       observed_tip_ledger: number | null
       cursor_updated_at: string | null
       quarantine_escalated_at: string | null
+      reorg_detected_at: string | null
+      reorg_contract_id: string | null
+      reorg_last_ledger: number | null
+      reorg_detail: string | null
     }>(
       // Member counts mirror the contract's two distinct getters:
       // get_total_members (all-time) vs get_active_members (current). Both
@@ -1144,7 +1241,12 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
          (SELECT last_ledger FROM indexer_cursor ORDER BY updated_at ASC NULLS FIRST LIMIT 1) AS last_ledger,
          (SELECT observed_tip_ledger FROM indexer_cursor ORDER BY updated_at ASC NULLS FIRST LIMIT 1) AS observed_tip_ledger,
          (SELECT updated_at FROM indexer_cursor ORDER BY updated_at ASC NULLS FIRST LIMIT 1) AS cursor_updated_at,
-         (SELECT escalated_at FROM quarantine_state WHERE id = 1)                  AS quarantine_escalated_at`
+         (SELECT escalated_at FROM quarantine_state WHERE id = 1)                  AS quarantine_escalated_at,
+         -- Issue #191: the latest uncleared ledger discontinuity, if any.
+         (SELECT detected_at FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1) AS reorg_detected_at,
+         (SELECT contract_id FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1) AS reorg_contract_id,
+         (SELECT last_ledger FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1) AS reorg_last_ledger,
+         (SELECT detail FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1) AS reorg_detail`
     )
     const cursorUpdatedAt = row?.cursor_updated_at
     const secondsSinceUpdate = cursorUpdatedAt
@@ -1195,6 +1297,18 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       estimatedLagSeconds,
       secondsSinceUpdate,
       indexerStale: isStale,
+      // Issue #191: a recorded, uncleared ledger discontinuity. Distinct from
+      // `indexerStale` — the worker halted on purpose and refuses to resume
+      // until an operator clears it (see docs/REORG_RECOVERY.md).
+      reorgDetected: row?.reorg_detected_at != null,
+      reorgHalt: row?.reorg_detected_at != null
+        ? {
+            detectedAt: new Date(row.reorg_detected_at).toISOString(),
+            contractId: row.reorg_contract_id ?? '',
+            lastLedger: row.reorg_last_ledger ?? null,
+            detail: row.reorg_detail ?? '',
+          }
+        : null,
       // Issue #156: live SSE connection count for this process.
       connectedStreams: getConnectedStreamCount(),
       // Issue #169: NOTIFY failures since process start — in-process only,

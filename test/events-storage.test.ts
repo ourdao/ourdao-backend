@@ -44,7 +44,7 @@ describe('events log — storage shape is pinned (issue #75)', () => {
   it('has exactly the documented columns', async () => {
     const cols = await query<{ column_name: string; data_type: string }>(
       `SELECT column_name, data_type FROM information_schema.columns
-       WHERE table_name = 'events' ORDER BY ordinal_position`
+       WHERE table_schema = current_schema() AND table_name = 'events' ORDER BY ordinal_position`
     )
     expect(cols).toEqual([
       { column_name: 'id', data_type: 'text' },
@@ -63,7 +63,7 @@ describe('events log — storage shape is pinned (issue #75)', () => {
 
   it('has exactly the three secondary indexes evaluated in docs/events-storage.md', async () => {
     const idx = await query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes WHERE tablename = 'events' ORDER BY indexname`
+      `SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'events' ORDER BY indexname`
     )
     expect(idx.map((r) => r.indexname).sort()).toEqual([
       'events_contract_id_idx',

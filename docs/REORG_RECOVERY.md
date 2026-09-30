@@ -103,7 +103,11 @@ The check throws `ReorgDetectedError` (`src/indexer/poller.ts`). In `runIndexer`
           the derived tables from the raw events log. See README "Reorg detection".
 ```
 
-The error propagates out of `runIndexer`, so the worker process exits non-zero (`[indexer] fatal:` in `src/worker.ts`). A container supervisor restarts it, it re-runs the same checks, re-halts — the process *stays* halted until an operator intervenes. That is the design: the indexer refuses to guess which history is real.
+Before the error propagates, `runIndexer` records the halt in `reorg_halts` (issue #191): the contract, the cursor's last folded ledger and hash, the detail above, and a timestamp. Then the worker process exits non-zero (`[indexer] fatal:` in `src/worker.ts`).
+
+A container supervisor restarts it — and the restarted worker refuses to start: `runIndexer` checks for an uncleared `reorg_halts` row before touching the RPC and exits with `[indexer] REFUSING TO RESUME`. This is deliberate. The three checks alone are not enough to keep a restart from resuming: once the chain advances past the old `last_ledger`, the coarse rewind check passes again, and if the RPC has since pruned that ledger the hash check reports "unverifiable" rather than "fork" — so an automatic restart could quietly continue from diverged history. The persisted record closes that gap. It is cleared by `npm run reindex` (section 6) or, for a false alarm, `npm run reorg:clear` (section 8).
+
+While the record is uncleared it is visible over the API, not only in logs: `GET /ready` returns `503` with `reason: reorg_detected` and a `reorg` object (`detectedAt`, `contractId`, `lastLedger`, `detail`), distinct from `indexer_stale`; `GET /api/stats` reports `reorgDetected: true` and the same details in `reorgHalt`.
 
 **Nothing is rolled back automatically.** There is no rollback SQL executed at halt time. The raw `events` log and every derived table are left exactly as committed. This is deliberate: the folded state still describes a consistent prefix of *some* history, and `npm run reindex` is the rollback — it rebuilds every derived table from the raw log in one transaction.
 
@@ -267,7 +271,10 @@ The worker may already have exited non-zero from the halt. Ensure it cannot rest
 ```bash
 psql "$DATABASE_URL" -c "SELECT * FROM indexer_cursor;" > reorg-cursor-$(date -u +%Y%m%dT%H%M%S).txt
 psql "$DATABASE_URL" -c "SELECT max(ledger), count(*) FROM events;" >> reorg-cursor-$(date -u +%Y%m%dT%H%M%S).txt
+psql "$DATABASE_URL" -c "SELECT * FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC;" >> reorg-cursor-$(date -u +%Y%m%dT%H%M%S).txt
 ```
+
+The `reorg_halts` row survives the worker's exit and its log rotation; `GET /ready` shows the same fields if you have no shell.
 
 Keep the halt log lines too. Cheap, and every post-mortem wants them.
 
@@ -281,7 +288,7 @@ Do not rebuild while the network itself is mid-reorganization, or the fresh rebu
 npm run reindex          # node dist/indexer/reindex.js in the container
 ```
 
-What it does is spelled out in section 3: truncate the derived tables, zero `dao_totals`, replay the entire `events` log in `(ledger, id)` order inside one transaction, restore notification read-states, and mark outstanding quarantine records resolved. Progress logs periodically (count, %, rate, ETA); at 10k events expect seconds.
+What it does is spelled out in section 3: truncate the derived tables, zero `dao_totals`, replay the entire `events` log in `(ledger, id)` order inside one transaction, restore notification read-states, mark outstanding quarantine records resolved, and clear the `reorg_halts` record (`cleared_by = 'reindex'`) so the worker may start again. Do not clear the record by hand and restart the worker without rebuilding — that is precisely the resume-past-divergence the record exists to prevent. Progress logs periodically (count, %, rate, ETA); at 10k events expect seconds.
 
 If it exits with `Cannot acquire reindex advisory lock (0x0d400001)` something else holds the lock — a live worker or another reindex. Stop that first; the lock is the guard that keeps a rebuild from racing a fold.
 
@@ -323,7 +330,7 @@ Then watch its logs for one normal poll cycle:
 
 **Step 7 — Close the loop.**
 
-- Confirm `GET /ready` returns `200` and `GET /api/stats` shows `ledgersBehind` shrinking to the normal few.
+- Confirm `GET /ready` returns `200` (the `reorg_detected` reason is gone) and `GET /api/stats` shows `reorgDetected: false` and `ledgersBehind` shrinking to the normal few.
 - If a frontend or consumers noticed the halt, send the all-clear with the incident window.
 - File the post-mortem: what diverged, how triage resolved it, total downtime. Attach the snapshot from step 2.
 
@@ -337,6 +344,14 @@ Then watch its logs for one normal poll cycle:
 ---
 
 ## 8. False alarms and near-miss alarms
+
+A halt that triage (section 5) shows to be an RPC fault rather than a real divergence — the RPC briefly served a wrong hash for `last_ledger` and now agrees with a second RPC — still leaves an uncleared `reorg_halts` record, and the worker will not start until it is cleared. Acknowledge it without rebuilding:
+
+```bash
+npm run reorg:clear          # node dist/indexer/clear-reorg.js in the container
+```
+
+It marks every open record `cleared_by = 'operator'` and keeps it as history. Only do this once you are confident nothing was folded from a diverged history; when in doubt, `npm run reindex` is always safe and also clears the record.
 
 Known ways the checks can fire without a chain reorg, and what each looks like:
 
