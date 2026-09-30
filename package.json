@@ -19,6 +19,7 @@
     "replay-failed": "tsx src/indexer/replay.ts",
     "bench:events": "tsx scripts/bench-events-storage.ts",
     "bench:api": "tsx scripts/bench-api-latency.ts",
+    "bench:stream": "tsx scripts/load-test-stream.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint .",
     "test": "vitest run",
