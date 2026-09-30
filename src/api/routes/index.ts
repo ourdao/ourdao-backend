@@ -26,7 +26,7 @@ import type {
 import { authenticateRequest, classifyStellarAddress, NonceStoreCapacityError, type NonceStore } from '../../auth.js'
 import { getConnectedStreamCount, getNotificationFailureCount, registerStreamEndpoint } from '../stream.js'
 import { historicalOrLive, setCachePolicy } from '../cache-policy.js'
-import { ConcurrencyGate } from '../load-shedding.js'
+import { ConcurrencyGate, GateShedError } from '../load-shedding.js'
 import { withLoanDerived } from '../loan-derived.js'
 
 function parseLimit(v: unknown, def = 50, max = 200): number | null {
@@ -857,16 +857,21 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     // allowed to be shed. A cache miss never waits behind another expensive
     // recomputation: preserving ordinary reads is more useful than making a
     // dashboard poll queue until the request pool is exhausted.
-    if (!statsGate.tryAcquire()) {
-      reply.header('Retry-After', String(config.http.statsRetryAfterSeconds))
-      return reply.code(503).send({ error: 'stats temporarily unavailable; retry shortly' })
-    }
-
+    //
+    // The work runs inside `statsGate.run()` so the slot is released on every
+    // exit path, including a synchronous throw before the first `await` (#272).
     try {
-      const value = await computeStats()
-      statsCache = { at: Date.now(), value }
+      const value = await statsGate.run(async () => {
+        const fresh = await computeStats()
+        statsCache = { at: Date.now(), value: fresh }
+        return fresh
+      })
       return { ...value, connectedStreams: liveStreams }
     } catch (err) {
+      if (err instanceof GateShedError) {
+        reply.header('Retry-After', String(config.http.statsRetryAfterSeconds))
+        return reply.code(503).send({ error: 'stats temporarily unavailable; retry shortly' })
+      }
       // A successful prior value remains useful during a transient database
       // failure. Surface that it is stale while retaining the normal shape.
       if (statsCache) {
@@ -875,8 +880,6 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
         return { ...statsCache.value, connectedStreams: liveStreams }
       }
       throw err
-    } finally {
-      statsGate.release()
     }
   })
 }
