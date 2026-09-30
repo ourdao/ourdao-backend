@@ -183,6 +183,16 @@ jobs:
           ignore-unfixed: false
           trivyignores: '.trivyignore'
 
+      - name: Enforce vulnerability policy (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: 'table'
+          severity: 'CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: false
+          trivyignores: '.trivyignore'
+
       # The `cp src/db/schema.sql … && cp -r src/db/migrations …` build step is
       # the failure most likely to reach production silently: add a migration,
       # forget the copy, image starts and dies at runtime while CI is green.

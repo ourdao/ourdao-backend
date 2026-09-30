@@ -9,3 +9,17 @@
 # Example:
 # # CVE-2026-XXXX: Busybox unaligned read, not reachable via node runtime. Tracking: #000
 # # CVE-2026-XXXX exp:2026-12-31
+#
+# NOTE: This file is consumed by the Trivy scan step in .github/workflows/ci.yml.
+# The CI workflow builds the production Dockerfile and runs Trivy against the
+# resulting image, failing the build on any CRITICAL severity CVE that is not
+# explicitly allowlisted below.
+#
+# To add a new entry, append it at the bottom of this file using the format:
+#   # CVE-YYYY-NNNNN: <rationale>. Tracking: <link or issue ref>
+#   # CVE-YYYY-NNNNN exp:YYYY-MM-DD
+#
+# Entries past their expiration date must be re-evaluated or removed; the CI
+# scan treats expired entries as active findings.
+
+# (No active allowlist entries.)
