@@ -102,9 +102,17 @@ async function notify(
   message: string
 ): Promise<void> {
   if (!address) return
+  // Replaying an event must not add a second copy of the same notification
+  // (#271). The indexer replays deliberately after a reorg and on any worker
+  // restart, and the same action can also be emitted by more than one handler
+  // path; `notifications_event_id_address_uniq` (0026) enforces one row per
+  // (event, recipient), and this makes the replay a no-op instead of an error.
+  // Read state lives on the row, so DO NOTHING also preserves a member having
+  // already marked the notification as read.
   await client.query(
     `INSERT INTO notifications (address, type, title, message, ledger, tx_hash, event_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (event_id, address) DO NOTHING`,
     [address, type, title, message, ev.ledger, ev.txHash, ev.id]
   )
 }

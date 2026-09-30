@@ -171,7 +171,10 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS notifications_address_idx ON notifications (address, read);
-CREATE INDEX IF NOT EXISTS notifications_event_id_address_idx ON notifications (event_id, address);
+-- UNIQUE, not a plain index: replaying an event must not write a second
+-- notification for the same action (#271). The insert path relies on this
+-- index existing for its `ON CONFLICT (event_id, address)` clause.
+CREATE UNIQUE INDEX IF NOT EXISTS notifications_event_id_address_uniq ON notifications (event_id, address);
 
 -- Lifetime money aggregates folded from the raw event log (issue #24).
 -- Single row (id = 1). O(1) to read; kept in sync as events fold, and

@@ -30,6 +30,7 @@ Entries that affect deployment or runtime state are annotated:
 
 
 ### Fixed
+- **Duplicate notifications on event replay**: `notifications` had a non-unique index on `(event_id, address)` and the indexer's insert had no conflict handling, so replaying an event (reorg recovery, worker restart, `npm run reindex`) appended another copy of the same notification to the member's inbox. The index is now `UNIQUE(event_id, address)`, existing duplicates are folded keeping the oldest row per event and recipient, and the insert uses `ON CONFLICT DO NOTHING` so a replay is a silent no-op that preserves read state **[Migration: 0026_notifications_event_id_unique.sql]** (#271).
 - **Duplicate migration version 22**: `0022_auth_nonces_rekey.sql` renumbered `0024` and annotated breaking; it no longer fails with `relation "auth_nonces_expires_at_idx" already exists` on a database that predates it **[Migration: 0024_auth_nonces_rekey.sql]**. Swagger/OpenAPI registration restored in `buildServer`.
 - **`withLoanDerived`** no longer throws on a malformed amount: the row's `interest_charge`/`repaid_amount` are `null` instead of a `500` for the whole list; a test asserts every `NUMERIC` column keeps scale zero (#195).
 - **Duplicate migration version 21**: `0021_quarantine_state.sql` renumbered `0023` **[Migration: 0023_quarantine_state.sql]**. `schema.sql` now includes `quarantine_state` and the 0022 `failed_events` uniqueness, and the quarantine-state upsert no longer references an invalid column.
