@@ -212,7 +212,7 @@ jobs:
       # Publishes full findings to GitHub Actions step summary and enforces
       # a failure policy on HIGH and CRITICAL vulnerabilities.
       - name: Scan image with Trivy (capture summary)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: ${{ env.IMAGE }}
           format: 'table'
@@ -235,7 +235,7 @@ jobs:
           fi
 
       - name: Enforce vulnerability policy (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: ${{ env.IMAGE }}
           format: 'table'
@@ -245,7 +245,7 @@ jobs:
           trivyignores: '.trivyignore'
 
       - name: Enforce vulnerability policy (fail on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: ${{ env.IMAGE }}
           format: 'table'
