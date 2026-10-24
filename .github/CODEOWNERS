@@ -2,13 +2,13 @@
 # See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Default owners for everything in src/
-/src/ @PLACEHOLDER_OWNER
+/src/ @bbjiggy
 
 # Stricter ownership for money-relevant state folding
-/src/indexer/ @PLACEHOLDER_OWNER
+/src/indexer/ @bbjiggy
 
 # Authorization boundary - requires owner review
-/src/auth.ts @PLACEHOLDER_OWNER
+/src/auth.ts @bbjiggy
 
 # Schema migrations - irreversible changes to production databases
-/src/db/migrations/ @PLACEHOLDER_OWNER
+/src/db/migrations/ @bbjiggy
