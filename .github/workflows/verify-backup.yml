@@ -90,10 +90,18 @@ jobs:
 
       - name: Set backup parameters from inputs
         if: ${{ inputs.backup_url }}
+        env:
+          BACKUP_URL: ${{ inputs.backup_url }}
+          EXPECTED_EVENTS_INPUT: ${{ inputs.expected_events }}
         run: |
-          echo "TEST_BACKUP_PATH=${{ inputs.backup_url }}" >> $GITHUB_ENV
-          if [ -n "${{ inputs.expected_events }}" ]; then
-            echo "EXPECTED_EVENTS=${{ inputs.expected_events }}" >> $GITHUB_ENV
+          echo "TEST_BACKUP_PATH=$BACKUP_URL" >> "$GITHUB_ENV"
+          if [ -n "$EXPECTED_EVENTS_INPUT" ]; then
+            if [[ "$EXPECTED_EVENTS_INPUT" =~ ^[0-9]*$ ]]; then
+              echo "EXPECTED_EVENTS=$EXPECTED_EVENTS_INPUT" >> "$GITHUB_ENV"
+            else
+              echo "Error: expected_events must be a non-negative integer" >&2
+              exit 1
+            fi
           fi
 
       - name: Run backup verification script
