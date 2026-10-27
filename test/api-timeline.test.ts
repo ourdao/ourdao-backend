@@ -118,6 +118,14 @@ describe('API: per-entity event timelines (issue #26)', () => {
       const res = await app.inject({ method: 'GET', url: '/api/loans/abc/timeline' })
       expect(res.statusCode).toBe(400)
     })
+
+    it('accepts valid loan id 0 (issue #379)', async () => {
+      await ev(10, 'loan_req', [0, BORROWER, '500', '550'])
+      const res = await app.inject({ method: 'GET', url: '/api/loans/0/timeline' })
+      expect(res.statusCode).toBe(200)
+      const { timeline } = res.json()
+      expect(timeline.map((e: { symbol: string }) => e.symbol)).toEqual(['loan_req'])
+    })
   })
 
   describe('GET /api/proposals/treasury/:id/timeline', () => {
@@ -154,6 +162,14 @@ describe('API: per-entity event timelines (issue #26)', () => {
       const res = await app.inject({ method: 'GET', url: '/api/proposals/treasury/42/timeline' })
       expect(res.statusCode).toBe(200)
       expect(res.json()).toEqual({ timeline: [] })
+    })
+
+    it('accepts valid treasury proposal id 0 (issue #379)', async () => {
+      await ev(10, 'tre_prop', [0, '1000', STRANGER, false])
+      const res = await app.inject({ method: 'GET', url: '/api/proposals/treasury/0/timeline' })
+      expect(res.statusCode).toBe(200)
+      const { timeline } = res.json()
+      expect(timeline.map((e: { symbol: string }) => e.symbol)).toEqual(['tre_prop'])
     })
   })
 

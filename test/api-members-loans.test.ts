@@ -114,7 +114,14 @@ describe('API: members and loans', () => {
     const missing = await app.inject({ method: 'GET', url: '/api/loans/999' })
     expect(missing.statusCode).toBe(404)
 
-    await query(`INSERT INTO loans (id, borrower, amount, outstanding) VALUES (1, 'GA', 100, 100)`)
+    const missingZero = await app.inject({ method: 'GET', url: '/api/loans/0' })
+    expect(missingZero.statusCode).toBe(404)
+
+    await query(`INSERT INTO loans (id, borrower, amount, outstanding) VALUES (0, 'GA0', 50, 50), (1, 'GA', 100, 100)`)
+    const foundZero = await app.inject({ method: 'GET', url: '/api/loans/0' })
+    expect(foundZero.statusCode).toBe(200)
+    expect(foundZero.json().borrower).toBe('GA0')
+
     const found = await app.inject({ method: 'GET', url: '/api/loans/1' })
     expect(found.statusCode).toBe(200)
     expect(found.json().borrower).toBe('GA')

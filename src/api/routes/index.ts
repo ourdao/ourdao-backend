@@ -131,12 +131,12 @@ function isMemberActivitySymbol(v: unknown): v is (typeof MEMBER_ACTIVITY_SYMBOL
   return typeof v === 'string' && (MEMBER_ACTIVITY_SYMBOLS as readonly string[]).includes(v)
 }
 
-// Validate a positive integer path param (loan / proposal id). Returns the
+// Validate a non-negative integer path param (loan / proposal id). Returns the
 // trimmed decimal string on success (kept as a string so it compares
 // directly against the JSONB-extracted `data->>0`), or null.
 function entityIdParam(v: string): string | null {
   const raw = v.trim()
-  if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) <= 0) return null
+  if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) < 0) return null
   return raw
 }
 
@@ -516,7 +516,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get<{ Params: { id: string } }>('/proposals/loan/:id', async (req, reply) => {
     setCachePolicy(reply, 'public-live')
     const rawId = req.params.id.trim()
-    if (!/^[0-9]+$/.test(rawId) || !Number.isSafeInteger(Number(rawId)) || Number(rawId) <= 0) {
+    if (!/^[0-9]+$/.test(rawId) || !Number.isSafeInteger(Number(rawId)) || Number(rawId) < 0) {
       return reply.code(400).send({ error: 'invalid proposal id' })
     }
     const proposal = await queryOne<LoanProposalRow>('SELECT * FROM loan_proposals WHERE id = $1', [Number(rawId)])
@@ -570,7 +570,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get<{ Params: { id: string } }>('/loans/:id', async (req, reply) => {
     setCachePolicy(reply, 'public-live')
     const rawId = req.params.id.trim()
-    if (!/^[0-9]+$/.test(rawId) || !Number.isSafeInteger(Number(rawId)) || Number(rawId) <= 0) {
+    if (!/^[0-9]+$/.test(rawId) || !Number.isSafeInteger(Number(rawId)) || Number(rawId) < 0) {
       return reply.code(400).send({ error: 'invalid loan id' })
     }
     const loan = await queryOne<LoanRow>('SELECT * FROM loans WHERE id = $1', [Number(rawId)])
@@ -624,7 +624,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   app.get<{ Params: { id: string } }>('/proposals/treasury/:id', async (req, reply) => {
     setCachePolicy(reply, 'public-live')
     const rawId = req.params.id.trim()
-    if (!/^[0-9]+$/.test(rawId) || !Number.isSafeInteger(Number(rawId)) || Number(rawId) <= 0) {
+    if (!/^[0-9]+$/.test(rawId) || !Number.isSafeInteger(Number(rawId)) || Number(rawId) < 0) {
       return reply.code(400).send({ error: 'invalid proposal id' })
     }
     const proposal = await queryOne<TreasuryProposalRow>('SELECT * FROM treasury_proposals WHERE id = $1', [Number(rawId)])

@@ -77,7 +77,7 @@ describe('API: pagination and path validation (#54, #55)', () => {
     }
   })
 
-  it.each(['/api/loans/not-a-number', '/api/loans/-1', '/api/loans/1.5', '/api/loans/0'])(
+  it.each(['/api/loans/not-a-number', '/api/loans/-1', '/api/loans/1.5'])(
     'rejects invalid numeric path parameters on %s',
     async (path) => {
       const spy = vi.spyOn(pool, 'query')
