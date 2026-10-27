@@ -63,6 +63,11 @@ describe('API: GET /api/documents (issue #44)', () => {
   it('rejects a non-numeric proposal_id before querying', async () => {
     const invalid = await app.inject({ method: 'GET', url: '/api/documents?kind=loan&proposal_id=abc' })
     expect(invalid.statusCode).toBe(400)
+    expect(invalid.json()).toMatchObject({ error: 'invalid proposal_id query param' })
+
+    const negative = await app.inject({ method: 'GET', url: '/api/documents?kind=loan&proposal_id=-5' })
+    expect(negative.statusCode).toBe(400)
+    expect(negative.json()).toMatchObject({ error: 'invalid proposal_id query param' })
   })
 })
 

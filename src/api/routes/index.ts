@@ -1032,7 +1032,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     }
     if (q.proposal_id !== undefined) {
       if (typeof q.proposal_id !== 'string' || !/^[0-9]+$/.test(q.proposal_id)) {
-        return reply.code(400).send({ error: 'proposal_id query param is required' })
+        return reply.code(400).send({ error: 'invalid proposal_id query param' })
       }
       params.push(Number(q.proposal_id))
       conditions.push(`proposal_id = $${params.length}`)
