@@ -24,6 +24,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:smoke": "vitest run test/soroban-rpc-smoke.test.ts",
     "test:coverage": "vitest run --coverage",
     "openapi:generate": "tsx scripts/generate-openapi-spec.ts",
     "openapi:validate": "tsx scripts/generate-openapi-spec.ts && git diff --exit-code openapi.json || (echo 'OpenAPI spec is out of sync. Run npm run openapi:generate and commit the changes.' && exit 1)",
