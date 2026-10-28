@@ -1,14 +1,28 @@
-# GitHub will automatically request reviews from the code owners listed below.
-# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# CODEOWNERS
+#
+# Only paths that can run code on a contributor's machine or in CI without
+# anyone reading it are listed here. A "main" ruleset requires approval from
+# one of these owners whenever a PR touches them. Everything else needs no
+# code-owner review.
+#
+# Patterns are unanchored on purpose, so they also match nested app folders
+# (apps/, packages/*, bindings/ts/ and so on).
 
-# Default owners for everything in src/
-/src/ @bbjiggy
+# Editor and container config: tasks can run when a folder is opened.
+.vscode/        @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
+.devcontainer/  @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
 
-# Stricter ownership for money-relevant state folding
-/src/indexer/ @bbjiggy
+# Package manifests and lockfiles: install and run scripts, dependency sources.
+package.json       @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
+package-lock.json  @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
+bun.lock           @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
+bun.lockb          @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
+yarn.lock          @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
+pnpm-lock.yaml     @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
+Cargo.lock         @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
 
-# Authorization boundary - requires owner review
-/src/auth.ts @bbjiggy
+# Workflows, Dependabot config and this file.
+.github/  @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
 
-# Schema migrations - irreversible changes to production databases
-/src/db/migrations/ @bbjiggy
+# Static assets: binaries and fonts can hide a payload a script loads.
+public/  @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
