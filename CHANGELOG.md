@@ -14,6 +14,9 @@ Entries that affect deployment or runtime state are annotated:
 
 ## [Unreleased]
 
+### Security
+- Bind dev docker-compose ports to 127.0.0.1 for Postgres and Redis to prevent exposure on external interfaces (#354).
+
 ### Added
 - **`POST /api/admin/clear-reorg`**: endpoint acknowledging recorded ledger discontinuities and clearing uncleared reorg halts while recording immutable audit trail entries to `admin_audit_log` with action `'clear_reorg'` (#402).
 - **Multi-contract quarantine state persistence**: `quarantine_state` table is now keyed by `contract_id` rather than a single singleton row, ensuring consecutive failure counters and escalation timestamps are tracked independently across multi-contract tailing **[Migration: 0033_multi_contract_quarantine_state.sql]** (#384).
