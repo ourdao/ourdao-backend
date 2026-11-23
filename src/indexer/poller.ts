@@ -7,10 +7,7 @@ import { server, getLatestLedger, getLatestLedgerInfo, getLedgerHash, getLedgers
 import { decodeEvent, type DecodedEvent } from '../stellar/events.js'
 import { applyEvent } from './handlers.js'
 import { DERIVED_TABLES, resetDaoTotals } from './derived-tables.js'
-import { REINDEX_LOCK_KEY } from './reindex.js'
-import { notifyStreamClientsAfterCommit, broadcastResyncToAllChannels, STREAM_CHANNELS, type StreamChannel } from '../api/stream.js'
-import { invalidateCache, invalidateMembersListCache, memberSummaryCacheKey } from '../cache/redis.js'
-import { getTracer } from '../telemetry.js'
+import { logger } from '../lib/logger.js'
 
 interface CursorRow {
   paging_token: string | null
@@ -207,22 +204,20 @@ async function loadCursor(contractId: string): Promise<CursorRow | null> {
   )
 }
 
-// Issue #173: saveCursor can fail on its own after folding succeeds. Track
-// these failures separately so the poll loop can distinguish:
-// 1. A transient saveCursor write failure (should be retried) — doesn't mean
-//    folding failed, just that persistence didn't complete
-// 2. A stalled indexer (the fold succeeded but the cursor wasn't persisted
-//    and later restarts/failures happen) — detected by examining cursor
-//    staleness vs actual folder progress
-//
-// Correctness holds today because folding is keyed on event id and is
-// idempotent. A cursor write failure followed by a crash leaves the fold
-// committed but the cursor behind; on restart the page is refetched but
-// events aren't re-applied (insertRawEvent's folded_at check — issue #119).
-// The issue is that /ready reports stale from an unchanging updated_at even
-// though events are being folded correctly. This tracking lets us distinguish
-// that case from a genuinely stalled indexer.
-async function saveCursor(
+/** Persist the poll cursor after a page has already been folded.
+ *
+ *  This can fail *after* the fold has committed (a dropped connection, a
+ *  lock timeout, the table temporarily unavailable). That is the confusing
+ *  failure mode this log line exists for: the indexer is folding correctly,
+ *  but it can't record where it got to, so the next poll refetches the same
+ *  page and `/ready` may report the cursor as stale. It is distinct from
+ *  `[indexer] poll error` (the RPC/getEvents call itself failed, so nothing
+ *  was folded) and from `indexer_stale` (the cursor is merely idle — the
+ *  indexer may be perfectly healthy). Retrying is safe: raw events are
+ *  idempotent on their unique id, so a replayed page does not double-fold.
+ *
+ *  Exported so tests can exercise the failure path directly. */
+export async function saveCursor(
   contractId: string,
   pagingToken: string | null,
   lastLedger: number,
@@ -231,19 +226,22 @@ async function saveCursor(
 ): Promise<void> {
   try {
     await pool.query(
-      `INSERT INTO indexer_cursor (paging_token, last_ledger, last_ledger_hash, observed_tip_ledger, contract_id, updated_at)
-       VALUES ($1, $2, $3, $4, $5, now())
-       ON CONFLICT (contract_id) DO UPDATE SET paging_token = $1, last_ledger = $2, last_ledger_hash = $3, observed_tip_ledger = $4, updated_at = now()`,
+      `INSERT INTO indexer_cursor (id, paging_token, last_ledger, last_ledger_hash, observed_tip_ledger, contract_id, updated_at)
+       VALUES (1, $1, $2, $3, $4, $5, now())
+       ON CONFLICT (id) DO UPDATE SET paging_token = $1, last_ledger = $2, last_ledger_hash = $3, observed_tip_ledger = $4, contract_id = $5, updated_at = now()`,
       [pagingToken, lastLedger, lastLedgerHash, observedTipLedger, contractId]
     )
-    // Clear this contract's prior cursor write failure now that this one succeeded
-    cursorWriteFailures.delete(contractId)
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    cursorWriteFailures.set(contractId, { error: msg, at: Date.now() })
-    // Re-throw: the poll loop needs to know folding didn't complete
-    // (the fold itself succeeded, but its progress wasn't recorded).
-    throw new Error(`Cursor write failed: ${msg}`, { cause: err })
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[indexer] Cursor write failed: ${message}`, {
+      event: 'cursor_write_failed',
+      contractId,
+      pagingToken,
+      lastLedger,
+      observedTipLedger,
+      error: message,
+    })
+    throw err
   }
 }
 

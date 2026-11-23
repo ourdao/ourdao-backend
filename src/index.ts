@@ -1,17 +1,10 @@
 import { config } from './config.js'
 import { migrate } from './db/migrate.js'
 import { pool } from './db/index.js'
-import { buildServer, shutdownNonceStore } from './api/server.js'
-import { shutdownSharedListener, drainStreamClients } from './api/stream.js'
-import { initTelemetry, shutdownTelemetry } from './telemetry.js'
-import { closeRedis } from './cache/redis.js'
-
-const SHUTDOWN_TIMEOUT_MS = 10_000
+import { buildServer } from './api/server.js'
+import { initTelemetry } from './telemetry.js'
 
 async function main(): Promise<void> {
-  // Issue #381: registered before anything else runs, matching src/worker.ts
-  // and OpenTelemetry's recommended Node.js bootstrap ordering — a no-op when
-  // OTEL_ENABLED is unset (the default), see src/telemetry.ts.
   initTelemetry()
   await migrate()
   const app = await buildServer()

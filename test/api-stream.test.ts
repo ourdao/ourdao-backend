@@ -1,7 +1,6 @@
-import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildServer } from '../src/api/server.js'
-import { pool } from '../src/db/index.js'
 import { closeDb, resetDb } from './db.js'
 import {
   DRAIN_STALL_DISCONNECT_MS,
@@ -78,7 +77,7 @@ describe('API: /api/stream', () => {
 
   it('GET /api/stream returns 200 with SSE headers (issue #158: prefixed path)', async () => {
     // Start the stream in a promise (it will block)
-    const streamPromise = app.inject({ method: 'GET', url: '/api/stream' }).then((res) => {
+    app.inject({ method: 'GET', url: '/api/stream' }).then((res) => {
       expect(res.statusCode).toBe(200)
       expect(res.headers['content-type']).toContain('text/event-stream')
       expect(res.headers['cache-control']).toBe('no-store')

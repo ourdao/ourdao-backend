@@ -4,62 +4,7 @@ import { applyEvent } from './handlers.js'
 import { namedFields, type DecodedEvent } from '../stellar/events.js'
 import { DERIVED_TABLES, resetDaoTotals } from './derived-tables.js'
 import { reindexRunsCounter, reindexDurationHistogram } from '../api/metrics.js'
-import { notifyStreamClientsAfterCommit, type StreamChannel } from '../api/stream.js'
-import { createHistoryCache } from '../api/history-cache.js'
-import { invalidateMembersListCache } from '../cache/redis.js'
-
-// Every acquisition pairs this key with `hashtext(current_schema())`, so the
-// lock is scoped to the schema the data lives in: one lock per deployment in
-// production (a single `public` schema), and one per worker schema in the
-// test suite, whose parallel workers would otherwise block one another
-// through the database-wide key.
-// Arbitrary fixed key for a session-level advisory lock, distinct from
-// MIGRATION_LOCK_KEY (0x0d40_0000). The indexer worker and reindex command
-// share this lock to ensure a reindex never races a live worker folding events.
-export const REINDEX_LOCK_KEY = 0x0d40_0001
-
-export class ReindexLockError extends Error {
-  constructor(
-    message = 'Cannot acquire reindex advisory lock (0x0d400001). Another reindex is in progress or the indexer worker is currently folding events. Stop the indexer worker before running reindex.'
-  ) {
-    super(message)
-    this.name = 'ReindexLockError'
-  }
-}
-export interface ReindexOptions {
-  /** Replay inside the transaction, then ROLLBACK instead of COMMIT. */
-  dryRun?: boolean;
-}
-
-export interface TableDiff {
-  table: string;
-  before: number;
-  after: number;
-  delta: number;
-}
-
-export interface ReindexSummary {
-  dryRun: boolean;
-  eventsReplayed: number;
-  tables: TableDiff[];
-  quarantinedBefore: number;
-  quarantinedAfter: number;
-}
-
-// Replace with your real derived-table list (reuse the one your TRUNCATE uses).
-const QUARANTINE_TABLE = 'quarantined_events'; // <- your real name
-
-async function countRows(client: PoolClient, table: string): Promise<number> {
-  // table names come from our own constant list, never user input
-  const { rows } = await client.query(`SELECT COUNT(*)::int AS n FROM ${table}`);
-  return rows[0].n;
-}
-
-async function snapshotCounts(client: PoolClient, tables: string[]) {
-  const out: Record<string, number> = {};
-  for (const t of tables) out[t] = await countRows(client, t);
-  return out;
-}
+import { logger } from '../lib/logger.js'
 
 interface EventLogRow {
   id: string
@@ -128,82 +73,38 @@ export async function reindexFromEventLog(): Promise<{ events: number }> {
     const totalRes = await client.query<{ count: string }>('SELECT count(*)::text AS count FROM events')
     const totalEvents = Number.parseInt(totalRes.rows[0]?.count ?? '0', 10)
 
-    const batchSize = Math.max(1, options?.batchSize ?? 1000)
-    const progressIntervalMs = options?.progressIntervalMs ?? 2000
-    let lastLedger: number | null = null
-    let lastId: string | null = null
-    const startTime = Date.now()
-    let lastLogTime = startTime
+    // Issue #531: report progress as structured JSON, one line per 10% (and
+    // the final event). `msg` keeps the human-readable text an operator
+    // watching a terminal saw before; the fields make it queryable.
+    const total = rows.length
+    const progressEvery = Math.max(1, Math.ceil(total / 10))
 
-    while (true) {
-      let queryText: string
-      let params: unknown[]
-
-      if (lastLedger === null || lastId === null) {
-        queryText = `SELECT id, ledger, closed_at, contract_id, symbol, topics, data, tx_hash
-                       FROM events
-                      ORDER BY ledger ASC, id ASC
-                      LIMIT $1`
-        params = [batchSize]
-      } else {
-        queryText = `SELECT id, ledger, closed_at, contract_id, symbol, topics, data, tx_hash
-                       FROM events
-                      WHERE ledger > $1 OR (ledger = $1 AND id > $2)
-                      ORDER BY ledger ASC, id ASC
-                      LIMIT $3`
-        params = [lastLedger, lastId, batchSize]
+    for (const [index, row] of rows.entries()) {
+      const data = Array.isArray(row.data) ? (row.data as unknown[]) : [row.data]
+      const ev: DecodedEvent = {
+        id: row.id,
+        ledger: row.ledger,
+        closedAt:
+          row.closed_at instanceof Date ? row.closed_at.toISOString() : String(row.closed_at),
+        contractId: row.contract_id,
+        txHash: row.tx_hash,
+        symbol: row.symbol,
+        topics: Array.isArray(row.topics) ? (row.topics as unknown[]) : [],
+        data,
+        fields: namedFields(row.symbol, data),
       }
+      await applyEvent(client, ev)
 
-      const { rows } = await client.query<EventLogRow>(queryText, params)
-      if (rows.length === 0) break
-
-      for (const row of rows) {
-        const data = Array.isArray(row.data) ? (row.data as unknown[]) : [row.data]
-        const ev: DecodedEvent = {
-          id: row.id,
-          ledger: row.ledger,
-          closedAt:
-            row.closed_at instanceof Date ? row.closed_at.toISOString() : String(row.closed_at),
-          contractId: row.contract_id,
-          txHash: row.tx_hash,
-          symbol: row.symbol,
-          topics: Array.isArray(row.topics) ? (row.topics as unknown[]) : [],
-          data,
-          fields: namedFields(row.symbol, data),
-        }
-        const channel = await applyEvent(client, ev)
-        if (channel) {
-          if (Array.isArray(channel)) {
-            for (const ch of channel) touchedChannels.add(ch)
-          } else {
-            touchedChannels.add(channel)
-          }
-        }
-        processed += 1
-        lastLedger = row.ledger
-        lastId = row.id
-      }
-
-      const now = Date.now()
-      if (totalEvents > 0 && (now - lastLogTime >= progressIntervalMs || processed === totalEvents)) {
-        const elapsedSec = (now - startTime) / 1000
-        const rate = elapsedSec > 0 ? (processed / elapsedSec).toFixed(1) : '0'
-        const pct = ((processed / totalEvents) * 100).toFixed(1)
-        const remaining = totalEvents - processed
-        const etaSec = elapsedSec > 0 && processed > 0 ? Math.round(remaining / (processed / elapsedSec)) : 0
-        console.log(
-          `[reindex] progress: ${processed}/${totalEvents} event(s) (${pct}%) up to ledger ${lastLedger ?? 0} — ` +
-            `${rate} ev/s, elapsed ${elapsedSec.toFixed(1)}s, ETA ${etaSec}s`
-        )
-        lastLogTime = now
-      }
-    }
-
-    if (savedReads.length > 0) {
-      for (const item of savedReads) {
-        await client.query(
-          `UPDATE notifications SET read = true WHERE event_id = $1 AND address = $2`,
-          [item.event_id, item.address]
+      const processed = index + 1
+      if (processed % progressEvery === 0 || processed === total) {
+        const elapsedSec = (Date.now() - startTime) / 1000
+        const ratePerSec = elapsedSec > 0 ? processed / elapsedSec : 0
+        const etaSec = ratePerSec > 0 ? Math.ceil((total - processed) / ratePerSec) : 0
+        const pct = total > 0 ? (processed / total) * 100 : 100
+        logger.info(
+          `[reindex] progress: ${processed}/${total} event(s) (${pct.toFixed(2)}%) — ` +
+            `${ratePerSec.toFixed(1)} events/s, eta ${etaSec}s`,
+          { processed, total, pct, ratePerSec, etaSec }
         )
       }
     }
@@ -277,11 +178,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   reindexFromEventLog()
     .then(({ events }) => {
-      console.log(`[reindex] rebuilt derived tables from ${events} event(s)`)
+      logger.info(`[reindex] rebuilt derived tables from ${events} event(s)`, { events })
       return pool.end()
     })
-    .catch((err) => {
-      console.error('[reindex] failed:', err instanceof Error ? err.message : err)
+    .catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[reindex] failed: ${message}`, { error: message })
       process.exit(1)
     })
 }

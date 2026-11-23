@@ -30,36 +30,8 @@ import {
   type AdminAuditLogRow,
   type AdminAuditAction,
 } from '../../types.js'
-import { authenticateRequest, classifyStellarAddress, NonceStoreCapacityError, type NonceStore, type AuthFailureTracker } from '../../auth.js'
-import { getConnectedStreamCount, getNotificationFailureCount, registerStreamEndpoint } from '../stream.js'
-import { historicalOrLive, setCachePolicy } from '../cache-policy.js'
-import { ConcurrencyGate, ConcurrencyLimitError } from '../load-shedding.js'
-import { withLoanDerived } from '../loan-derived.js'
-import { getOrSetCache, membersListCacheKey, memberSummaryCacheKey } from '../../cache/redis.js'
-import { replayFailedEvent } from '../../indexer/replay.js'
-import { clearRecordedReorg } from '../../indexer/clear-reorg.js'
-import { createHistoryCache } from '../history-cache.js'
-import { configuredContracts, loadContractCursorHealth } from '../contract-health.js'
-
-function parseLimit(v: unknown, def = 50, max = 200): number | null {
-  if (v === undefined || v === null || v === '') return def
-  const raw = String(v).trim()
-  if (!/^[0-9]+$/.test(raw)) return null
-  const n = Number(raw)
-  if (!Number.isSafeInteger(n) || n <= 0 || n > max) return null
-  return n
-}
-
-function invalidLimit(v: unknown, def = 50, max = 200): boolean {
-  return parseLimit(v, def, max) === null
-}
-
-// Issue #165: how many of a member's loans /members/:address/summary embeds
-// inline. The full history is always available, paginated, from
-// GET /api/loans?borrower=<address> — this cap only bounds the size of the
-// summary payload itself. Named so the LIMIT and the has-more comparison
-// it's checked against can never drift apart.
-const LOANS_EMBED_LIMIT = 100
+import { authenticateRequest, isValidStellarAddress, type NonceStore } from '../../auth.js'
+import { getTracer, requestSpan, type Span } from '../../telemetry.js'
 
 // Small helper: clamp a `limit` query param to a sane range.
 function limit(v: unknown, def = 50, max = 200): number {
@@ -407,11 +379,9 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     try {
       const nonce = await nonceStore.issue(address, req.log)
       return { nonce }
-    } catch (error) {
-      if (error instanceof NonceStoreCapacityError) {
-        return reply.code(503).send({ error: 'Service temporarily unavailable' })
-      }
-      throw error
+    } catch {
+      // Nonce store capacity exceeded
+      return reply.code(503).send({ error: 'Service temporarily unavailable' })
     }
   })
 
@@ -455,23 +425,64 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       return reply.code(400).send({ error: 'invalid Stellar address' })
     }
 
-    // Issue #277: this is one of the heaviest reads in the API (several CTEs,
-    // an aggregate over the member's full loan history) and is keyed
-    // per-address, so it's cached the same way as /api/members above. A
-    // "member not found" result is cached too (as `null`) rather than
-    // special-cased out of the cache — the `joined` handler's cache
-    // invalidation (see src/indexer/poller.ts) clears exactly this key the
-    // moment that address actually becomes a member, so a fresh join is
-    // never stuck behind a stale negative lookup for the full TTL.
-    const address = req.params.address
-    const result = await getOrSetCache(memberSummaryCacheKey(address), config.cache.memberCacheTtlSeconds, async () => {
-      const summary = await fetchMemberSummary(address)
-      if (!summary) return null
-      if (summary.loans && Array.isArray(summary.loans)) {
-        summary.loans = summary.loans.map((l) => withLoanDerived(l, req.log))
-      }
-      return summary
+    // Issue #530: the summary is one wide CTE with several sub-queries, so a
+    // child span around it is the useful granularity (the request span alone
+    // can't say which query in the handler took the time).
+    const querySpan = getTracer().startSpan('members.summary', {
+      parent: requestSpan(req),
+      attributes: { 'db.system': 'postgresql' },
     })
+    const summary = await queryOne<{ summary: MemberSummary }>(`
+      WITH m AS (
+        SELECT * FROM members WHERE address = $1
+      ),
+      totals AS (
+        SELECT 
+          (SELECT COALESCE(SUM(contribution), 0) FROM members WHERE joined_ledger IS NOT NULL) as total_contribution,
+          (SELECT COALESCE(SUM(stake), 0) FROM members WHERE exited = false) as total_stake
+      ),
+      unread_notifs AS (
+        SELECT COUNT(*) as unread_count FROM notifications WHERE address = $1 AND read = false
+      ),
+      member_loans AS (
+        SELECT COALESCE(json_agg(row_to_json(l)), '[]'::json) as loans,
+               COUNT(*) FILTER (WHERE status = 'repaid') as repaid_loans_count,
+               COUNT(*) FILTER (WHERE status = 'defaulted') as defaulted_loans_count,
+               COALESCE(SUM(outstanding) FILTER (WHERE status = 'defaulted'), 0) as defaulted_loans_value
+        FROM (
+          SELECT * FROM loans WHERE borrower = $1 ORDER BY id DESC LIMIT 100
+        ) l
+      )
+      SELECT 
+        json_build_object(
+          'member', row_to_json(m.*),
+          'loans', (SELECT loans FROM member_loans),
+          'unread_notifications', (SELECT unread_count::int FROM unread_notifs),
+          'position', json_build_object(
+            'contribution_share_bps', CASE 
+              WHEN (SELECT total_contribution FROM totals) > 0 
+              THEN ((m.contribution * 10000) / (SELECT total_contribution FROM totals))::text 
+              ELSE '0' 
+            END,
+            'stake_share_bps', CASE 
+              WHEN (SELECT total_stake FROM totals) > 0 AND m.exited = false
+              THEN ((m.stake * 10000) / (SELECT total_stake FROM totals))::text 
+              ELSE '0' 
+            END,
+            'repaid_loans_count', COALESCE((SELECT repaid_loans_count::int FROM member_loans), 0),
+            'defaulted_loans_count', COALESCE((SELECT defaulted_loans_count::int FROM member_loans), 0),
+            'defaulted_loans_value', COALESCE((SELECT defaulted_loans_value FROM member_loans), 0)::text
+          )
+        ) as summary
+      FROM m
+    `, [req.params.address]).finally(() => querySpan.end())
+
+    if (!summary || !summary.summary) return reply.code(404).send({ error: 'member not found' })
+
+    const result = summary.summary
+    if (result.loans && Array.isArray(result.loans)) {
+      result.loans = result.loans.map(withLoanDerived)
+    }
 
     if (!result) return reply.code(404).send({ error: 'member not found' })
     return result
@@ -1749,7 +1760,14 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
   let statsCache: { at: number; value: DAOStats } | null = null
   const statsGate = new ConcurrencyGate(Math.max(1, config.http.statsMaxConcurrent))
 
-  async function computeStats(): Promise<DAOStats> {
+  async function computeStats(parent?: Span): Promise<DAOStats> {
+    // Issue #530: one child span around the aggregate — it is the heaviest
+    // single query in the API, and the request span alone can't distinguish
+    // it from the (cheap) cache-hit path.
+    const statsSpan = getTracer().startSpan('stats.aggregate', {
+      parent,
+      attributes: { 'db.system': 'postgresql' },
+    })
     const row = await queryOne<{
       total_members: string
       active_members: string
@@ -1797,24 +1815,11 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
          (SELECT principal_lent     FROM dao_totals WHERE id = 1)                  AS principal_lent,
          (SELECT principal_repaid   FROM dao_totals WHERE id = 1)                  AS principal_repaid,
          (SELECT value_defaulted    FROM dao_totals WHERE id = 1)                  AS value_defaulted,
-         (SELECT count(*) FROM failed_events WHERE resolved_at IS NULL)            AS quarantined_events,
-         -- Issue #289: indexer_cursor has one row per tailed contract now.
-         -- Same "worst row wins" aggregation as /ready — last_ledger,
-         -- observed_tip_ledger and cursor_updated_at must come from the
-         -- *same* row (the least-recently-updated one) so the freshness
-         -- figures derived from them below stay internally consistent,
-         -- rather than each column independently picking a different
-         -- contract's value.
-         (SELECT last_ledger FROM indexer_cursor ORDER BY updated_at ASC NULLS FIRST LIMIT 1) AS last_ledger,
-         (SELECT observed_tip_ledger FROM indexer_cursor ORDER BY updated_at ASC NULLS FIRST LIMIT 1) AS observed_tip_ledger,
-         (SELECT updated_at FROM indexer_cursor ORDER BY updated_at ASC NULLS FIRST LIMIT 1) AS cursor_updated_at,
-         (SELECT escalated_at FROM quarantine_state WHERE escalated_at IS NOT NULL ORDER BY escalated_at DESC LIMIT 1) AS quarantine_escalated_at,
-         -- Issue #191: the latest uncleared ledger discontinuity, if any.
-         (SELECT detected_at FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1) AS reorg_detected_at,
-         (SELECT contract_id FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1) AS reorg_contract_id,
-         (SELECT last_ledger FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1) AS reorg_last_ledger,
-         (SELECT detail FROM reorg_halts WHERE cleared_at IS NULL ORDER BY id DESC LIMIT 1) AS reorg_detail`
-    )
+         (SELECT count(*) FROM failed_events)                                     AS quarantined_events,
+         (SELECT last_ledger FROM indexer_cursor WHERE id = 1)                     AS last_ledger,
+         (SELECT observed_tip_ledger FROM indexer_cursor WHERE id = 1)             AS observed_tip_ledger,
+         (SELECT updated_at FROM indexer_cursor WHERE id = 1)                      AS cursor_updated_at`
+    ).finally(() => statsSpan.end())
     const cursorUpdatedAt = row?.cursor_updated_at
     const secondsSinceUpdate = cursorUpdatedAt
       ? Math.floor((Date.now() - new Date(cursorUpdatedAt).getTime()) / 1000)
@@ -1905,131 +1910,7 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
     }
   }
 
-  // --- Configured contracts and cursor health (issue #506) ---
-  // Unauthenticated, like /api/stats and /health (which already lists the
-  // configured contract ids). No member-private data is exposed. The response
-  // is deliberately a plain array, one entry per configured contract, with
-  // the same staleness/halt conventions /ready and /api/stats use.
-  app.get('/contracts', {
-    schema: {
-      tags: ['stats'],
-      summary: 'Tailed contracts and cursor health',
-      description:
-        'Lists every configured contract (CONTRACT_IDS, or the single CONTRACT_ID) with its last indexed ledger, observed RPC ledger tip, staleness and uncleared reorg halt. Unauthenticated operational diagnostic, consistent with /api/stats and /health. Cursor-write failures are not here: that map is worker-local — see the worker diagnostic listener documented in the README.',
-      response: {
-        200: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              contractId: { type: 'string' },
-              lastIndexedLedger: { type: ['integer', 'null'] },
-              observedTipLedger: { type: ['integer', 'null'] },
-              ledgersBehind: { type: ['integer', 'null'] },
-              secondsSinceUpdate: { type: ['integer', 'null'] },
-              stale: { type: 'boolean', description: 'True when the cursor has been idle longer than INDEXER_STALE_AFTER_MS.' },
-              status: {
-                type: 'string',
-                enum: ['cold_start', 'stale', 'ok'],
-                description: "cold_start means no cursor row yet; stale and ok follow /ready's staleness rule.",
-              },
-              reorgDetected: { type: 'boolean', description: 'True when an uncleared reorg halt exists for this contract.' },
-            },
-          },
-        },
-        503: {
-          type: 'object',
-          properties: { error: { type: 'string' } },
-        },
-      },
-    },
-  }, async () => {
-    const ids = configuredContracts()
-    const health = await loadContractCursorHealth(ids)
-    return ids.map((contractId) => {
-      const contract = health[contractId]!
-      return {
-        contractId,
-        lastIndexedLedger: contract.lastIndexedLedger,
-        observedTipLedger: contract.observedTipLedger,
-        ledgersBehind: contract.ledgersBehind,
-        secondsSinceUpdate: contract.secondsSinceUpdate,
-        stale: contract.stale,
-        status: contract.status,
-        reorgDetected: contract.reorgDetected,
-      }
-    })
-  })
-
-  app.get('/stats', {
-    schema: {
-      tags: ['stats'],
-      summary: 'DAO statistics',
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            totalMembers: { type: 'integer' },
-            activeMembers: { type: 'integer' },
-            totalLoanProposals: { type: 'integer' },
-            totalLoans: { type: 'integer' },
-            activeLoans: { type: 'integer' },
-            defaultedLoans: { type: 'integer' },
-            totalDefaultedValue: { type: 'string' },
-            totalTreasuryProposals: { type: 'integer' },
-            totalStaked: { type: 'string' },
-            totalContribution: { type: 'string' },
-            stakingRatio: { type: 'number' },
-            interestCollected: { type: 'string' },
-            principalLent: { type: 'string' },
-            principalRepaid: { type: 'string' },
-            valueDefaulted: { type: 'string' },
-            quarantinedEvents: { type: 'integer' },
-            quarantineEscalatedAt: { type: ['string', 'null'] },
-            lastIndexedLedger: { type: ['integer', 'null'] },
-            observedTipLedger: { type: ['integer', 'null'] },
-            ledgersBehind: { type: ['integer', 'null'] },
-            estimatedLagSeconds: { type: ['integer', 'null'] },
-            secondsSinceUpdate: { type: ['integer', 'null'] },
-            indexerStale: { type: 'boolean' },
-            connectedStreams: { type: 'integer' },
-            notificationFailures: { type: 'integer' },
-            reorgDetected: { type: 'boolean' },
-            contracts: {
-              type: 'object',
-              description: 'Per-contract indexer health, present only with multiple CONTRACT_IDS.',
-              additionalProperties: {
-                type: 'object',
-                properties: {
-                  lastIndexedLedger: { type: ['integer', 'null'] },
-                  observedTipLedger: { type: ['integer', 'null'] },
-                  ledgersBehind: { type: ['integer', 'null'] },
-                  quarantinedEvents: { type: 'integer' },
-                  quarantineEscalatedAt: { type: ['string', 'null'] },
-                  reorgDetected: { type: 'boolean' },
-                },
-              },
-            },
-            reorgHalt: {
-              type: ['object', 'null'],
-              properties: {
-                detectedAt: { type: 'string' },
-                contractId: { type: 'string' },
-                lastLedger: { type: ['integer', 'null'] },
-                detail: { type: 'string' },
-              },
-            },
-          },
-        },
-        503: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' },
-          },
-        },
-      },
-    },
-  }, async (_req, reply): Promise<DAOStats | { error: string }> => {
+  app.get('/stats', async (req, reply): Promise<DAOStats> => {
     const ttl = config.http.statsCacheMs
     setCachePolicy(reply, 'public-live')
     // Issue #156 / #382: connectedStreams and notificationFailures are live
@@ -2071,90 +1952,8 @@ export async function registerRoutes(app: FastifyInstance, opts: { nonceStore: N
       }
       throw err
     }
-  })
-
-  app.get('/stats/history', {
-    schema: {
-      tags: ['stats'],
-      summary: 'Historical daily loan aggregates',
-      response: {
-        200: {
-          type: 'object',
-          required: ['data'],
-          properties: {
-            data: {
-              type: 'array',
-              items: {
-                type: 'object',
-                required: ['date', 'principalLent', 'principalRepaid', 'defaults', 'valueDefaulted', 'cumulativeDefaultRatePercent'],
-                properties: {
-                  date: { type: 'string', format: 'date' },
-                  principalLent: { type: 'string' },
-                  principalRepaid: { type: 'string' },
-                  defaults: { type: 'integer' },
-                  valueDefaulted: { type: 'string' },
-                  cumulativeDefaultRatePercent: { type: 'number' },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
-  }, async (_req, reply) => {
-    setCachePolicy(reply, 'public-live')
-    const cached = await historyCache.get()
-    if (cached) return cached
-
-    const rows = await query<{
-      day: string
-      principal_lent: string
-      principal_repaid: string
-      defaults_count: number
-      value_defaulted: string
-      cumulative_originated: string
-      cumulative_defaults: string
-    }>(
-      `WITH bounds AS (
-         SELECT min(day) AS first_day, (now() AT TIME ZONE 'UTC')::date AS last_day
-           FROM daily_loan_stats
-       ), calendar AS (
-         SELECT generate_series(first_day, last_day, interval '1 day')::date AS day
-           FROM bounds
-          WHERE first_day IS NOT NULL
-       ), daily AS (
-         SELECT day, principal_lent, principal_repaid, defaults_count, value_defaulted,
-                loans_originated
-           FROM daily_loan_stats
-       )
-       SELECT calendar.day::text AS day,
-              COALESCE(daily.principal_lent, 0)::text AS principal_lent,
-              COALESCE(daily.principal_repaid, 0)::text AS principal_repaid,
-              COALESCE(daily.defaults_count, 0) AS defaults_count,
-              COALESCE(daily.value_defaulted, 0)::text AS value_defaulted,
-              SUM(COALESCE(daily.loans_originated, 0)) OVER (ORDER BY calendar.day)::text AS cumulative_originated,
-              SUM(COALESCE(daily.defaults_count, 0)) OVER (ORDER BY calendar.day)::text AS cumulative_defaults
-         FROM calendar
-         LEFT JOIN daily USING (day)
-        ORDER BY calendar.day`
-    )
-    const result = {
-      data: rows.map((row) => {
-        const originated = Number(row.cumulative_originated)
-        const defaults = Number(row.cumulative_defaults)
-        return {
-          date: row.day,
-          principalLent: row.principal_lent,
-          principalRepaid: row.principal_repaid,
-          defaults: row.defaults_count,
-          valueDefaulted: row.value_defaulted,
-          cumulativeDefaultRatePercent: originated === 0
-            ? 0
-            : Number(((defaults / originated) * 100).toFixed(4)),
-        }
-      }),
-    }
-    await historyCache.set(result)
-    return result
+    const value = await computeStats(requestSpan(req))
+    statsCache = { at: Date.now(), value }
+    return value
   })
 }

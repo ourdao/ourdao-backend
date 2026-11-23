@@ -595,50 +595,10 @@ export class StreamClient {
   private sendMessage(msg: StreamMessage, opts: { force?: boolean } = {}): void {
     if (this.closed) return
 
-    // Issue #155: advance this client's id baseline whenever a message
-    // carries a newer ledger sequence; otherwise repeat the last one
-    // (heartbeats and the initial "Connected" message don't carry a ledger
-    // of their own, so they report the most recent one this client knows).
-    const ledger = msg.payload?.ledger
-    if (typeof ledger === 'number' && ledger > this.lastSentLedger) {
-      this.lastSentLedger = ledger
-    }
-
-    const eventType = msg.type
-    const id = `${this.lastSentLedger}`
-    const data = JSON.stringify({
-      type: msg.type,
-      channel: msg.channel,
-      payload: msg.payload,
-      timestamp: msg.timestamp,
-    })
-    // SSE format: event type, id, and data, as a single write so exactly
-    // one write() return value governs this whole frame's backpressure.
-    const frame = `event: ${eventType}\nid: ${id}\ndata: ${data}\n\n`
-
-    sseMessagesTotal.inc({ event_type: eventType })
-    if (this.paused && !opts.force) {
-      this.enqueue(frame)
-      return
-    }
-    this.writeFrame(frame)
-  }
-
-  private writeFrame(frame: string): void {
-    try {
-      const ok = this.reply.raw.write(frame)
-      if (ok) {
-        // Issue #285: explicit reset (previously a no-op in every prior call
-        // site, since writeFrame was only ever reached while already
-        // unpaused) — needed now that the heartbeat retry loop can call this
-        // while `paused` is still true, to correctly observe recovery from a
-        // real write succeeding rather than only from a 'drain' event.
-        this.paused = false
-        this.clearStallTimer()
-      } else {
-        this.paused = true
-        this.armStallTimer()
-      }
+      // SSE format: event type, id, and data
+      this.reply.raw.write(`event: ${eventType}\n`)
+      this.reply.raw.write(`id: ${id}\n`)
+      this.reply.raw.write(`data: ${data}\n\n`)
     } catch {
       // Ignore write errors (client disconnected)
       if (this.reply.raw.destroyed) {
@@ -918,16 +878,8 @@ export async function notifyStreamClients(
 ): Promise<void> {
   try {
     const payloadJson = payload ? JSON.stringify(payload) : ''
-    const byteLength = Buffer.byteLength(payloadJson, 'utf8')
-    if (byteLength > PG_NOTIFY_MAX_PAYLOAD_BYTES) {
-      notificationFailureCount += 1
-      logger.error('NOTIFY payload exceeds size limit; refusing', {
-        channel,
-        byteLength,
-        limitBytes: PG_NOTIFY_MAX_PAYLOAD_BYTES,
-      })
-      return
-    }
+    // `NOTIFY` does not accept bind parameters; pg_notify() does, and is
+    // equally transactional (delivered on commit).
     await client.query('SELECT pg_notify($1, $2)', [channel, payloadJson])
   } catch (err) {
     // Log but don't throw — notification failure shouldn't break the indexer

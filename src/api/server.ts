@@ -15,6 +15,14 @@ import { clientErrorHandler, frameworkErrors, registerErrorHandling } from './er
 import { registerRoutes } from './routes/index.js'
 import { registerStreamEndpoint } from './stream.js'
 import { MemoryNonceStore, PostgresNonceStore, type NonceStore } from '../auth.js'
+import { register as metricsRegister } from './metrics.js'
+import {
+  clearRequestSpan,
+  getTracer,
+  isTelemetryEnabled,
+  requestSpan,
+  setRequestSpan,
+} from '../telemetry.js'
 import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -241,6 +249,38 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
       deepLinking: true,
     },
   } as const)
+
+  // ── Tracing (issue #530) ──
+  // One span per request, created after routing so it can be named by the
+  // route pattern (not the concrete URL). No-op when OTEL_ENABLED is off:
+  // both hooks return before allocating anything.
+  app.addHook('preValidation', async (req) => {
+    if (!isTelemetryEnabled()) return
+    const route = req.routeOptions?.url ?? req.url
+    const span = getTracer().startSpan(`HTTP ${req.method} ${route}`, {
+      attributes: {
+        'http.request.method': req.method,
+        'http.route': route,
+      },
+    })
+    setRequestSpan(req, span)
+  })
+
+  app.addHook('onError', async (req, _reply, error) => {
+    const span = requestSpan(req)
+    if (!span) return
+    span.recordException(error)
+    span.setStatus('ERROR', error.message)
+  })
+
+  app.addHook('onResponse', async (req, reply) => {
+    const span = requestSpan(req)
+    if (!span) return
+    span.setAttribute('http.response.status_code', reply.statusCode)
+    span.setStatus(reply.statusCode >= 500 ? 'ERROR' : 'OK')
+    span.end()
+    clearRequestSpan(req)
+  })
 
   await app.register(etag)
   // Registered after etag so its onSend sees the final headers (issue #194).

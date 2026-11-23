@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { pool } from '../src/db/index.js'
 import { replayFailedEvent, replayAllFailedEvents } from '../src/indexer/replay.js'
 import { resetDb, closeDb } from './db.js'
-import { replayOutcomesCounter, register as metricsRegister } from '../src/api/metrics.js'
+import { register as metricsRegister } from '../src/api/metrics.js'
 
 /**
  * Tests for replay functionality (issue #529).

@@ -1,53 +1,31 @@
-// SPDX-License-Identifier: MIT
+// Structured logger for code paths outside a Fastify request — the CLI
+// entrypoints (reindex, replay) and the indexer's cursor writer. Requests go
+// through Fastify/Pino; these paths have no `request.log`, so they emit one
+// JSON object per line instead of a hand-formatted string. That keeps a
+// terminal-watching operator's view unchanged (`msg` still reads like the old
+// line) while making every field machine-queryable in a log aggregator.
+//
+// There is no LOG_LEVEL gate, matching the indexer worker's existing
+// behaviour: every call is emitted.
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
-/**
- * Minimal structured logger that respects the LOG_LEVEL environment variable.
- *
- * Unlike `console.debug`, messages are only emitted when the configured level
- * is at least as verbose as the call level. Output is a single JSON line so it
- * can be consumed by log aggregators and filtering tools.
- */
-
-import { logLevel } from '../config.js'
-
-const LEVELS: Record<string, number> = {
-  silent: 0,
-  fatal: 1,
-  error: 2,
-  warn: 3,
-  info: 4,
-  debug: 5,
-  trace: 6,
+export interface StructuredLogger {
+  debug(msg: string, fields?: Record<string, unknown>): void
+  info(msg: string, fields?: Record<string, unknown>): void
+  warn(msg: string, fields?: Record<string, unknown>): void
+  error(msg: string, fields?: Record<string, unknown>): void
 }
 
-const configuredLevel = logLevel(process.env, 'LOG_LEVEL', 'info')
-const currentLevel: number = LEVELS[configuredLevel] ?? LEVELS.info ?? 0
-
-function log(level: string, message: string, extra: Record<string, unknown> = {}) {
-  if ((LEVELS[level] ?? 0) > currentLevel) return
-  console.log(
-    JSON.stringify({
-      level,
-      message,
-      time: new Date().toISOString(),
-      ...extra,
-    })
-  )
+function emit(level: LogLevel, msg: string, fields?: Record<string, unknown>): void {
+  const line = JSON.stringify({ level, time: new Date().toISOString(), msg, ...fields })
+  if (level === 'error') console.error(line)
+  else if (level === 'warn') console.warn(line)
+  else console.log(line)
 }
 
-export const logger = {
-  fatal: (message: string, extra?: Record<string, unknown>) => log('fatal', message, extra),
-  error: (message: string, extra?: Record<string, unknown>) => log('error', message, extra),
-  warn: (message: string, extra?: Record<string, unknown>) => log('warn', message, extra),
-  info: (message: string, extra?: Record<string, unknown>) => log('info', message, extra),
-  debug: (message: string, extra?: Record<string, unknown>) => log('debug', message, extra),
-  trace: (message: string, extra?: Record<string, unknown>) => log('trace', message, extra),
-}
-
-/**
- * Truncate a Stellar address for logging, keeping the first and last 4 chars.
- */
-export function formatAddress(address: string): string {
-  if (address.length <= 12) return address
-  return `${address.slice(0, 4)}...${address.slice(-4)}`
+export const logger: StructuredLogger = {
+  debug: (msg, fields) => emit('debug', msg, fields),
+  info: (msg, fields) => emit('info', msg, fields),
+  warn: (msg, fields) => emit('warn', msg, fields),
+  error: (msg, fields) => emit('error', msg, fields),
 }
