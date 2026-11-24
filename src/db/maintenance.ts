@@ -12,7 +12,15 @@ import type { Client } from 'pg'
 // reclaims dead-tuple space and refreshes the planner's statistics without
 // taking the exclusive table lock `VACUUM FULL` would, so it never blocks
 // concurrent reads/writes from the API or indexer.
-const VACUUM_TABLES = ['events', 'auth_nonces', 'notifications'] as const
+const VACUUM_TABLES = [
+  'events',
+  'auth_nonces',
+  'notifications',
+  'members',
+  'loan_proposals',
+  'loans',
+  'treasury_proposals',
+] as const
 
 export interface TableMaintenanceResult {
   table: string

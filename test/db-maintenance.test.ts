@@ -13,7 +13,7 @@ function fakeClient(queryImpl: (sql: string) => Promise<{ rowCount: number | nul
 }
 
 describe('db/maintenance: runMaintenance', () => {
-  it('VACUUMs events, auth_nonces, and notifications, and sweeps expired nonces', async () => {
+  it('VACUUMs events, auth_nonces, notifications, members, loan_proposals, loans, and treasury_proposals, and sweeps expired nonces', async () => {
     const calls: string[] = []
     const client = fakeClient(async (sql) => {
       calls.push(sql)
@@ -26,9 +26,13 @@ describe('db/maintenance: runMaintenance', () => {
     expect(calls).toContain('VACUUM (ANALYZE) events')
     expect(calls).toContain('VACUUM (ANALYZE) auth_nonces')
     expect(calls).toContain('VACUUM (ANALYZE) notifications')
+    expect(calls).toContain('VACUUM (ANALYZE) members')
+    expect(calls).toContain('VACUUM (ANALYZE) loan_proposals')
+    expect(calls).toContain('VACUUM (ANALYZE) loans')
+    expect(calls).toContain('VACUUM (ANALYZE) treasury_proposals')
     expect(calls.some((c) => c.startsWith('DELETE FROM auth_nonces'))).toBe(true)
 
-    expect(result.tables).toHaveLength(3)
+    expect(result.tables).toHaveLength(7)
     expect(result.tables.every((t) => t.ok)).toBe(true)
     expect(result.expiredNoncesDeleted).toBe(3)
     expect(result.expiredNoncesError).toBeUndefined()
@@ -44,16 +48,28 @@ describe('db/maintenance: runMaintenance', () => {
     const result = await runMaintenance(client)
 
     const tableNames = result.tables.map((t) => t.table)
-    expect(tableNames).toEqual(['events', 'auth_nonces', 'notifications'])
+    expect(tableNames).toEqual([
+      'events',
+      'auth_nonces',
+      'notifications',
+      'members',
+      'loan_proposals',
+      'loans',
+      'treasury_proposals',
+    ])
 
     const failed = result.tables.find((t) => t.table === 'auth_nonces')!
     expect(failed.ok).toBe(false)
     expect(failed.error).toContain('lock not available')
 
-    // The other two tables still ran and succeeded — one failure doesn't
+    // The other six tables still ran and succeeded — one failure doesn't
     // abort the run (issue #279).
     expect(result.tables.find((t) => t.table === 'events')!.ok).toBe(true)
     expect(result.tables.find((t) => t.table === 'notifications')!.ok).toBe(true)
+    expect(result.tables.find((t) => t.table === 'members')!.ok).toBe(true)
+    expect(result.tables.find((t) => t.table === 'loan_proposals')!.ok).toBe(true)
+    expect(result.tables.find((t) => t.table === 'loans')!.ok).toBe(true)
+    expect(result.tables.find((t) => t.table === 'treasury_proposals')!.ok).toBe(true)
   })
 
   it('records the expired-nonce sweep failing without throwing', async () => {
